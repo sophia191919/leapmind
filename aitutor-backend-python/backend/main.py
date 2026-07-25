@@ -71,8 +71,8 @@ app = FastAPI(
     response_model_by_alias=True,
 )
 def get_weak_points(
-    user_id: int = Query(..., description="用户ID"),
-    top_n: int = Query(10, description="返回前N个薄弱点"),
+    user_id: int = Query(..., alias="userId", description="用户ID"),
+    top_n: int = Query(10, alias="topN", description="返回前N个薄弱点"),
 ):
     # 1. 拉取原始数据
     user_answers = db.fetch_user_answers(user_id)
