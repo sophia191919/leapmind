@@ -18,6 +18,8 @@ from typing import AsyncGenerator, Optional
 from ..ai import get_ai_provider, AIMessage, MessageRole
 from ..utils.json_extractor import JSONExtractor
 from ..validators import ValidationPipeline
+from ..ab_testing import ABExperiment
+from .parallel_engine import ParallelExecutor
 from .prompts.lesson_prep_prompts import (
     build_stage1_messages,
     build_stage2_messages,
@@ -64,9 +66,15 @@ def _sse_event(event: str, data: dict) -> str:
 class LessonPrepService:
     """Three-stage lesson preparation service."""
 
-    def __init__(self):
+    # Minimum number of items to trigger parallel mode
+    PARALLEL_THRESHOLD = 3
+
+    def __init__(self, parallel: bool = False, experiment: ABExperiment | None = None):
         self.provider = get_ai_provider()
+        self.parallel = parallel
+        self.experiment = experiment
         self._pipeline: ValidationPipeline | None = None
+        self._executor: ParallelExecutor | None = None
 
     @property
     def pipeline(self) -> ValidationPipeline:
@@ -74,6 +82,73 @@ class LessonPrepService:
         if self._pipeline is None:
             self._pipeline = ValidationPipeline(auto_fix=True)
         return self._pipeline
+
+    @property
+    def executor(self) -> ParallelExecutor:
+        """Lazy-init parallel executor (5 concurrent by default)."""
+        if self._executor is None:
+            self._executor = ParallelExecutor(max_concurrency=5)
+        return self._executor
+
+    # ════════════════════════════════════════════════════════════
+    # [Layer 3] A/B test hooks
+    # ════════════════════════════════════════════════════════════
+
+    def _select_prompt_version(self, stage: str, user_id: int) -> str | None:
+        """Select prompt version based on A/B experiment assignment.
+
+        Returns:
+            "A" for control, "B" for variant, None if no experiment is running.
+        """
+        if not self.experiment or self.experiment.status != "running":
+            return None
+        return self.experiment.assign(user_id)
+
+    def _record_ab_metrics(self, ctx: PrepContext) -> None:
+        """Record A/B test metrics after all stages complete."""
+        if not self.experiment or self.experiment.status != "running":
+            return
+
+        group = self._select_prompt_version("final", ctx.user_id)
+        if group is None:
+            return
+
+        # Calculate aggregate metrics from validation results
+        slides = ctx.slides or []
+        narrations = ctx.narrations or []
+
+        schema_pass_rate = 1.0
+        if slides:
+            fallback = sum(1 for s in slides if s.get("is_fallback"))
+            schema_pass_rate = 1.0 - (fallback / len(slides))
+
+        orality_scores = []
+        consistency_scores = []
+        duration_deviations = []
+
+        for n in narrations:
+            val = n.get("_validation", {})
+            if val:
+                orality_scores.append(val.get("orality", {}).get("score", 0))
+                consistency_scores.append(val.get("consistency", {}).get("coverage", 0))
+                dur = val.get("duration", {})
+                if dur.get("target_seconds", 0) > 0:
+                    duration_deviations.append(dur.get("deviation", 0))
+
+        avg_orality = sum(orality_scores) / max(len(orality_scores), 1)
+        avg_consistency = sum(consistency_scores) / max(len(consistency_scores), 1)
+        avg_dur_dev = sum(duration_deviations) / max(len(duration_deviations), 1)
+
+        self.experiment.record_result(
+            user_id=ctx.user_id,
+            group=group,
+            metrics={
+                "schema_pass_rate": schema_pass_rate,
+                "avg_orality_score": avg_orality,
+                "avg_consistency_score": avg_consistency,
+                "avg_duration_deviation": avg_dur_dev,
+            },
+        )
 
     # ════════════════════════════════════════════════════════════
     # Public entry point
@@ -242,69 +317,100 @@ class LessonPrepService:
     # Stage 2: PPT slide generation (per-section batch, per-slide yield)
     # ════════════════════════════════════════════════════════════
 
-    async def _stage2_slides(self, ctx: PrepContext) -> AsyncGenerator[str, None]:
-        """Generate slides: one AI call per syllabus section, yields per-slide events."""
-        all_slides: list[dict] = []
+    async def _generate_single_slide(
+        self, section: dict, ctx: PrepContext
+    ) -> list[dict]:
+        """Generate one or more slides from a syllabus section.
 
-        for section in ctx.syllabus.get("sections", []):
-            section_json = json.dumps(section, ensure_ascii=False, indent=2)
-            messages = build_stage2_messages(
-                section_json=section_json,
-                user_profile_summary=ctx.user_profile_summary,
-            )
+        Returns:
+            List of slide dicts (may contain fallback placeholders).
+        """
+        section_json = json.dumps(section, ensure_ascii=False, indent=2)
+        messages = build_stage2_messages(
+            section_json=section_json,
+            user_profile_summary=ctx.user_profile_summary,
+        )
 
-            try:
-                response = await self.provider.chat_completion(messages)
-                raw = response.content
-                parsed = JSONExtractor.extract(raw, fallback=[])
-            except Exception as e:
-                logger.warning(f"Slide generation failed for section: {e}")
-                ctx.errors.append({
+        try:
+            response = await self.provider.chat_completion(messages)
+            raw = response.content
+            parsed = JSONExtractor.extract(raw, fallback=[])
+        except Exception as e:
+            logger.warning(f"Slide generation failed for section '{section.get('title', '')}': {e}")
+            ctx.errors.append({
+                "stage": "stage2",
+                "section_title": section.get("title", ""),
+                "error": str(e),
+            })
+            # Return one fallback slide
+            return [{
+                "page_num": 0,
+                "type": "content",
+                "title": section.get("title", "内容页"),
+                "bullet_points": ["内容生成失败，请重试"],
+                "is_fallback": True,
+            }]
+
+        slides_batch = parsed if isinstance(parsed, list) else [parsed]
+        validated: list[dict] = []
+        for slide in slides_batch:
+            if not isinstance(slide, dict) or "title" not in slide:
+                slide = {
+                    "page_num": 0,
+                    "type": "content",
+                    "title": section.get("title", "内容页"),
+                    "bullet_points": ["内容生成失败，请重试"],
+                    "is_fallback": True,
+                }
+            # Validate and fix
+            slide_vr = await self.pipeline.validate("slide", slide)
+            if slide_vr.warnings:
+                ctx.warnings.append({
                     "stage": "stage2",
                     "section_title": section.get("title", ""),
-                    "error": str(e),
+                    "warnings": slide_vr.warnings,
                 })
-                parsed = []
+            if slide_vr.fixes_applied:
+                slide = self.pipeline.get_fixed_data("slide", slide)
+            validated.append(slide)
+        return validated
 
-            # parsed could be a single slide dict or a list of slides
-            slides_batch = parsed if isinstance(parsed, list) else [parsed]
+    async def _stage2_slides(self, ctx: PrepContext) -> AsyncGenerator[str, None]:
+        """Generate slides: one AI call per syllabus section, yields per-slide events."""
+        sections = ctx.syllabus.get("sections", [])
 
-            for slide in slides_batch:
-                if not isinstance(slide, dict) or "title" not in slide:
-                    # Fallback placeholder
-                    slide = {
-                        "page_num": len(all_slides) + 1,
-                        "type": "content",
-                        "title": section.get("title", "内容页"),
-                        "bullet_points": ["内容生成失败，请重试"],
-                        "is_fallback": True,
-                    }
-
-                # ── [Layer 2] Validate slide schema ──
-                slide_vr = await self.pipeline.validate("slide", slide)
-                if slide_vr.warnings:
-                    ctx.warnings.append({
-                        "stage": "stage2",
-                        "page_num": slide.get("page_num", len(all_slides) + 1),
-                        "warnings": slide_vr.warnings,
+        if self.parallel and len(sections) >= self.PARALLEL_THRESHOLD:
+            # ── Parallel path [Layer 3] ──
+            slide_batches = await self.executor.map(
+                items=sections,
+                fn=lambda section: self._generate_single_slide(section, ctx),
+                progress_callback=None,  # we yield after collection
+            )
+            all_slides: list[dict] = []
+            for batch in slide_batches:
+                if batch is None:
+                    continue
+                for slide in batch:
+                    slide.setdefault("page_num", len(all_slides) + 1)
+                    all_slides.append(slide)
+                    yield _sse_event("slide", {
+                        "page_num": slide["page_num"],
+                        "total_pages": "?",
+                        "slide": slide,
                     })
-                    for w in slide_vr.warnings:
-                        yield _sse_event("warn", {
-                            "stage": "stage2",
-                            "validator": "slide_schema",
-                            "page_num": slide.get("page_num", len(all_slides) + 1),
-                            "message": w,
-                        })
-                if slide_vr.fixes_applied:
-                    slide = self.pipeline.get_fixed_data("slide", slide)
-
-                slide.setdefault("page_num", len(all_slides) + 1)
-                all_slides.append(slide)
-                yield _sse_event("slide", {
-                    "page_num": slide["page_num"],
-                    "total_pages": "?",  # updated in slides_done
-                    "slide": slide,
-                })
+        else:
+            # ── Serial path (original) ──
+            all_slides = []
+            for section in sections:
+                slides_batch = await self._generate_single_slide(section, ctx)
+                for slide in slides_batch:
+                    slide.setdefault("page_num", len(all_slides) + 1)
+                    all_slides.append(slide)
+                    yield _sse_event("slide", {
+                        "page_num": slide["page_num"],
+                        "total_pages": "?",
+                        "slide": slide,
+                    })
 
         ctx.slides = all_slides
         yield _sse_event("slides_done", {
@@ -315,87 +421,125 @@ class LessonPrepService:
     # Stage 3: Narration generation (per-slide)
     # ════════════════════════════════════════════════════════════
 
+    async def _generate_single_narration(
+        self, slide: dict, target_seconds: int, ctx: PrepContext
+    ) -> dict:
+        """Generate corrected narration for a single slide.
+
+        Returns:
+            Narration dict with _validation metadata (may be fallback on error).
+        """
+        slide_json = json.dumps(slide, ensure_ascii=False, indent=2)
+        messages = build_stage3_messages(
+            slide_json=slide_json,
+            slide_title=slide.get("title", ""),
+            slide_type=slide.get("type", "content"),
+            target_seconds=target_seconds,
+            subject=ctx.subject,
+        )
+
+        try:
+            response = await self.provider.chat_completion(messages)
+            raw = response.content
+            narration = JSONExtractor.extract_dict(raw, fallback={})
+        except Exception as e:
+            logger.warning(f"Narration failed for slide {slide.get('page_num', '?')}: {e}")
+            ctx.errors.append({
+                "stage": "stage3",
+                "page_num": slide.get("page_num", 0),
+                "error": str(e),
+            })
+            narration = {
+                "narration_text": f"（第{slide.get('page_num', '?')}页讲解词生成失败）",
+                "estimated_duration_seconds": 30,
+            }
+
+        narration.setdefault("narration_text", "")
+        narration.setdefault("estimated_duration_seconds", target_seconds)
+        narration.setdefault("key_emphasis", [])
+        narration.setdefault("pauses", [])
+
+        # Validate + correct (Layer 2)
+        corrected = self.pipeline.get_fixed_data(
+            "narration", narration,
+            slide=slide,
+            target_seconds=target_seconds,
+        )
+        return corrected
+
     async def _stage3_narrations(self, ctx: PrepContext) -> AsyncGenerator[str, None]:
         """Generate narration text: one AI call per slide."""
-        all_narrations: list[dict] = []
-
-        # Pre-compute target durations per slide
         target_seconds_list = self._compute_target_seconds(ctx)
+        slides = ctx.slides
+        slide_count = len(slides)
 
-        for idx, slide in enumerate(ctx.slides):
-            target_seconds = target_seconds_list[idx] if idx < len(target_seconds_list) else 60
-            slide_json = json.dumps(slide, ensure_ascii=False, indent=2)
+        # Build task inputs: (slide, target_seconds)
+        class NarrationTask:
+            def __init__(self, slide: dict, target: int):
+                self.slide = slide
+                self.target_seconds = target
 
-            messages = build_stage3_messages(
-                slide_json=slide_json,
-                slide_title=slide.get("title", ""),
-                slide_type=slide.get("type", "content"),
-                target_seconds=target_seconds,
-                subject=ctx.subject,
+        tasks = [
+            NarrationTask(slide, target_seconds_list[i] if i < len(target_seconds_list) else 60)
+            for i, slide in enumerate(slides)
+        ]
+
+        if self.parallel and len(tasks) >= self.PARALLEL_THRESHOLD:
+            # ── Parallel path [Layer 3] ──
+            raw_narrations = await self.executor.map(
+                items=tasks,
+                fn=lambda t: self._generate_single_narration(t.slide, t.target_seconds, ctx),
+                progress_callback=None,
             )
+            all_narrations = [
+                n if n is not None else {
+                    "narration_text": "（讲解词生成失败）",
+                    "estimated_duration_seconds": 30,
+                }
+                for n in raw_narrations
+            ]
+        else:
+            # ── Serial path (original) ──
+            all_narrations = []
+            for i, task in enumerate(tasks):
+                narration = await self._generate_single_narration(
+                    task.slide, task.target_seconds, ctx
+                )
+                all_narrations.append(narration)
 
-            try:
-                response = await self.provider.chat_completion(messages)
-                raw = response.content
-                narration = JSONExtractor.extract_dict(raw, fallback={})
-            except Exception as e:
-                logger.warning(f"Narration generation failed for slide {idx + 1}: {e}")
-                ctx.errors.append({
-                    "stage": "stage3",
-                    "page_num": slide.get("page_num", idx + 1),
-                    "error": str(e),
-                })
-                narration = {"narration_text": f"（第{idx + 1}页讲解词生成失败）", "estimated_duration_seconds": 30}
+        # Yield narration events (and warnings) from collected results
+        for i, (narration, task) in enumerate(zip(all_narrations, tasks)):
+            page_num = task.slide.get("page_num", i + 1)
+            val_score = narration.get("_validation", {}).get("overall_score", 1.0)
 
-            # Ensure required fields
-            narration.setdefault("narration_text", "")
-            narration.setdefault("estimated_duration_seconds", target_seconds)
-            narration.setdefault("key_emphasis", [])
-            narration.setdefault("pauses", [])
-
-            # ── [Layer 2] Validate + correct narration quality ──
-            # Run get_fixed_data which validates and applies corrections:
-            #   - Override estimated_duration_seconds with validator's calculation
-            #   - Add _validation metadata block (scores, issues)
-            #   - Flag _needs_review if oral quality is poor
-            corrected_narration = self.pipeline.get_fixed_data(
-                "narration", narration,
-                slide=slide,
-                target_seconds=target_seconds,
-            )
-
-            # Also collect warnings for SSE warn events
+            # Check for warnings (re-run validation to get warn text)
             nar_vr = await self.pipeline.validate(
                 "narration", narration.get("narration_text", ""),
-                slide=slide,
-                target_seconds=target_seconds,
+                slide=task.slide,
+                target_seconds=task.target_seconds,
             )
             if nar_vr.warnings:
                 ctx.warnings.append({
                     "stage": "stage3",
-                    "page_num": slide.get("page_num", idx + 1),
+                    "page_num": page_num,
                     "warnings": nar_vr.warnings,
                 })
                 for w in nar_vr.warnings:
                     yield _sse_event("warn", {
                         "stage": "stage3",
                         "validator": "narration_quality",
-                        "page_num": slide.get("page_num", idx + 1),
+                        "page_num": page_num,
                         "message": w,
                     })
 
-            # Extract quality score for event metadata
-            val_score = corrected_narration.get("_validation", {}).get("overall_score", 1.0)
-
-            all_narrations.append(corrected_narration)
             yield _sse_event("narration", {
-                "page_num": slide.get("page_num", idx + 1),
-                "total_pages": len(ctx.slides),
-                "narration_text": corrected_narration["narration_text"],
-                "estimated_duration_seconds": corrected_narration["estimated_duration_seconds"],
+                "page_num": page_num,
+                "total_pages": slide_count,
+                "narration_text": narration["narration_text"],
+                "estimated_duration_seconds": narration["estimated_duration_seconds"],
                 "quality_score": val_score,
-                "duration_deviation": corrected_narration.get("duration_deviation"),
-                "needs_review": corrected_narration.get("_needs_review", False),
+                "duration_deviation": narration.get("duration_deviation"),
+                "needs_review": narration.get("_needs_review", False),
             })
 
         ctx.narrations = all_narrations

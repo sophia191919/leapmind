@@ -29,6 +29,7 @@ class LessonPrepRequest(BaseModel):
     style: str = Field(default="standard", description="备课风格: standard/detailed/interactive")
     weak_point_ids: list[int] = Field(default_factory=list, description="薄弱知识点ID列表（可选）")
     user_profile_summary: Optional[str] = Field(default=None, description="用户画像摘要（M6注入，可选）")
+    parallel: bool = Field(default=False, description="[Layer 3] 是否启用并行加速（Stage 2/3 限流并发，3倍以上加速）")
 
 
 # ─── SSE streaming endpoint ───
@@ -46,7 +47,7 @@ async def generate_lesson_prep(request: LessonPrepRequest):
     异常时返回:
       error — 包含 stage 和 message 字段
     """
-    service = LessonPrepService()
+    service = LessonPrepService(parallel=request.parallel)
     return StreamingResponse(
         service.run_stream(
             user_id=request.user_id,
