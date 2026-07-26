@@ -7,7 +7,6 @@ import LecturePage from './pages/LecturePage';
 import LecturePage2 from './pages/LecturePage2';
 import TemHomePage from './pages/TemHomePage';
 import ProfilePage from './pages/ProfilePage.jsx';
-import TeacherAvatarPage from './pages/TeacherAvatarPage.jsx';
 import { hasValidToken } from './utils/tokenManager';
 import { checkAuth, logout } from './services/authService';
 
@@ -17,7 +16,6 @@ export default function App() {
     const [currentCourseId, setCurrentCourseId] = useState('');
     const [guestRoute, setGuestRoute] = useState('home'); // home | profile
     const [showProfile, setShowProfile] = useState(false);
-    const [showTeacherAvatar, setShowTeacherAvatar] = useState(false);
 
     useEffect(() => {
         const checkSession = async () => {
@@ -73,15 +71,12 @@ export default function App() {
             ) : currentCourseId ? (
                       <LecturePage2 courseId={currentCourseId} onBack={() => setCurrentCourseId('')} />
             ) : (
-                showTeacherAvatar ? (
-                    <TeacherAvatarPage onBack={() => setShowTeacherAvatar(false)} />
-                ) : showProfile ? (
+                showProfile ? (
                     <ProfilePage onBack={() => setShowProfile(false)} />
                 ) : (
                     <TemHomePage 
                         onEnterProject={(courseId) => setCurrentCourseId(courseId)}
                         onOpenProfile={handleOpenProfile}
-                        onOpenTeacherAvatar={() => setShowTeacherAvatar(true)}
                     />
                 )
             )}

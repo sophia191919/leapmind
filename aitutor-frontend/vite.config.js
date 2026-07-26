@@ -57,12 +57,6 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
-        // M8 虚拟教师形象、偏好与 TTS（Java 后端）
-        '/api/virtual-teacher': {
-          target: javaApi,
-          changeOrigin: true,
-          secure: false,
-        },
       },
     },
   }

@@ -28,11 +28,6 @@ export {
   SEMESTER,
 } from './courseService';
 
-// 对话服务（M7 ChatPanel）
-export {
-  default as chatService,
-} from './chatService';
-
 // Token 管理
 export {
   saveToken,
