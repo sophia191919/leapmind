@@ -28,10 +28,16 @@ import ProgressBar from "../components/practice/ProgressBar";
 import Timer from "../components/practice/Timer";
 import QuestionNav from "../components/practice/QuestionNav";
 import { generateSession, submitAnswer } from "../services/practiceService";
+import { ChatPanel } from "../components/chat";
+import { getUserInfo } from "../utils/tokenManager";
 
 const SESSION_KEY = "m1_practice_session";
 
 export default function PracticePage({ onBack, onAskAI, embedded = false }) {
+  // --- ChatPanel 状态 ---
+  const [chatPanelOpen, setChatPanelOpen] = useState(false);
+  const userInfo = getUserInfo();
+
   // --- 会话状态 ---
   const [session, setSession] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -363,10 +369,10 @@ export default function PracticePage({ onBack, onAskAI, embedded = false }) {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* 去问 AI（预留） */}
-            {currentAnswer?.submitted && onAskAI && (
+            {/* 问 AI（ChatPanel） */}
+            {currentAnswer?.submitted && (
               <button
-                onClick={() => onAskAI(currentQuestion)}
+                onClick={() => setChatPanelOpen((v) => !v)}
                 className="flex items-center gap-1.5 px-4 py-2.5 bg-violet-50 text-violet-600 rounded-xl text-sm font-medium hover:bg-violet-100 transition-colors cursor-pointer"
               >
                 <MessageCircle size={16} /> 问 AI
@@ -464,6 +470,20 @@ export default function PracticePage({ onBack, onAskAI, embedded = false }) {
           </div>
         </div>
       </div>
+      {/* ChatPanel 弹出层 */}
+      {chatPanelOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end pointer-events-none">
+          <div className="pointer-events-auto w-96 h-full shadow-2xl">
+            <ChatPanel
+              sceneType="doing_exercise"
+              context={{ questionId: currentQuestion?.questionId }}
+              userId={userInfo?.id}
+              visible={chatPanelOpen}
+              onClose={() => setChatPanelOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
