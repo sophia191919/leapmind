@@ -28,27 +28,6 @@ export {
   SEMESTER,
 } from './courseService';
 
-// M1 做题板块服务
-export {
-  getQuestions,
-  getFilterOptions,
-  getQuestionDetail,
-  generateSession,
-  submitAnswer,
-  getWrongQuestions,
-  toggleFocus,
-  deleteWrongQuestion,
-  getStatistics,
-  getRanking,
-  getPointsHistory,
-  dailyCheckin,
-} from './practiceService';
-
-// 对话服务（M7 ChatPanel）
-export {
-  default as chatService,
-} from './chatService';
-
 // Token 管理
 export {
   saveToken,
