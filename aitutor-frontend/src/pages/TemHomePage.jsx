@@ -1,6 +1,6 @@
 "use client"
 
-import { Star, ChevronRight, MessageCircle, ChevronDown } from "lucide-react"
+import { Star, ChevronRight, MessageCircle, ChevronDown, Sparkles } from "lucide-react"
 import { useState, useRef, useLayoutEffect, useEffect } from "react"
 import { getAllStages, getGradesByStage } from '../services/educationService'
 import { getSections, SEMESTER } from '../services/courseService'
@@ -35,7 +35,7 @@ const scrollbarStyles = `
   }
 `
 
-export default function LearningApp({ onOpenProfile, onEnterProject }) {
+export default function LearningApp({ onOpenProfile, onEnterProject, onOpenTeacherAvatar }) {
   // UI 状态
   const [isGradeOpen, setIsGradeOpen] = useState(false)
   const [lineStyle, setLineStyle] = useState({ top: 0, bottom: 0 })
@@ -493,6 +493,14 @@ export default function LearningApp({ onOpenProfile, onEnterProject }) {
           </nav>
         </div>
         <div className="relative inline-flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => onOpenTeacherAvatar?.()}
+            className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 py-2.5 text-sm font-bold text-white shadow-lg backdrop-blur-md transition hover:-translate-y-0.5 hover:bg-white/20"
+          >
+            <Sparkles className="h-4 w-4 text-cyan-200" />
+            虚拟教师
+          </button>
           {/* 学期选择器 */}
           <div className="relative">
             <div className="inline-flex items-center rounded-full bg-[#A286FF]/40 p-1 shadow-lg">
