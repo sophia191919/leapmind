@@ -70,6 +70,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/admin/**").permitAll()
                         // 允许访问管理后台审核接口
                         .requestMatchers("/admin/review/**").permitAll()
+                        // 允许访问流式对话和打断接口
+                        .requestMatchers("/api/conversation/**").permitAll()
                         // 语音合成和音频相关接口需要认证
                         .requestMatchers("/api/speech/**").authenticated()
                         // 语音对话接口需要认证
