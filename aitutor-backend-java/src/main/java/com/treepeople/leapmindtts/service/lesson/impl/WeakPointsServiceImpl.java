@@ -8,6 +8,8 @@ import com.treepeople.leapmindtts.pojo.dto.ExerciseRecordRequest;
 import com.treepeople.leapmindtts.pojo.entity.UserExercise;
 import com.treepeople.leapmindtts.pojo.entity.UserWeakPoint;
 import com.treepeople.leapmindtts.pojo.vo.ExerciseVO;
+import com.treepeople.leapmindtts.pojo.vo.KnowledgeGraphVO;
+import com.treepeople.leapmindtts.pojo.vo.RecommendQuestionVO;
 import com.treepeople.leapmindtts.pojo.vo.UserWeakPointVO;
 import com.treepeople.leapmindtts.pojo.vo.WeakPointsAnalysisVO;
 import com.treepeople.leapmindtts.service.lesson.WeakPointsService;
@@ -391,5 +393,149 @@ public class WeakPointsServiceImpl implements WeakPointsService {
         if ("MEDIUM".equalsIgnoreCase(level)) return "中";
         if ("LOW".equalsIgnoreCase(level)) return "低";
         return level;
+    }
+
+    // ==================== 推荐题目 + 知识图谱 ====================
+
+    @Override
+    public List<RecommendQuestionVO> recommendQuestions(Long userId, String knowledgePoint, Integer count) {
+        if (count == null || count <= 0) {
+            count = 5;
+        }
+
+        // 查找该知识点的薄弱点记录
+        List<UserWeakPoint> weakPoints = userWeakPointMapper.selectByUserId(userId);
+        UserWeakPoint target = null;
+        if (weakPoints != null) {
+            for (UserWeakPoint wp : weakPoints) {
+                if (wp.getKnowledgePoint() != null && wp.getKnowledgePoint().equals(knowledgePoint)) {
+                    target = wp;
+                    break;
+                }
+            }
+        }
+
+        // 确定题目难度：薄弱程度高→基础题，中→中等题，低→提高题
+        String difficulty;
+        String reason;
+        if (target != null) {
+            switch (target.getWeaknessLevel() != null ? target.getWeaknessLevel().toUpperCase() : "MEDIUM") {
+                case "HIGH":
+                    difficulty = "EASY";
+                    reason = "该知识点错误率较高，建议从基础题开始巩固";
+                    break;
+                case "MEDIUM":
+                    difficulty = "MEDIUM";
+                    reason = "该知识点掌握一般，建议进行中等难度练习";
+                    break;
+                default:
+                    difficulty = "HARD";
+                    reason = "该知识点掌握较好，建议挑战提高题";
+            }
+        } else {
+            difficulty = "MEDIUM";
+            reason = "暂无该知识点的练习记录";
+        }
+
+        List<RecommendQuestionVO> questions = new ArrayList<>();
+        String[] questionTypes = {"选择题", "填空题", "解答题"};
+        String[] templates = {
+            "关于「%s」的基础练习题",
+            "「%s」的综合应用题",
+            "「%s」的易错题训练",
+            "「%s」的巩固练习题",
+            "「%s」的能力提升题"
+        };
+
+        for (int i = 0; i < count; i++) {
+            questions.add(RecommendQuestionVO.builder()
+                    .questionId("Q_" + userId + "_" + sanitizeKey(knowledgePoint) + "_" + (i + 1))
+                    .knowledgePoint(knowledgePoint)
+                    .subject(target != null ? target.getSubject() : null)
+                    .difficulty(difficulty)
+                    .questionType(questionTypes[i % questionTypes.length])
+                    .questionTitle(String.format(templates[i % templates.length], knowledgePoint))
+                    .reason(reason)
+                    .build());
+        }
+
+        return questions;
+    }
+
+    @Override
+    public KnowledgeGraphVO getKnowledgeGraph(Long userId, String subject) {
+        List<UserWeakPoint> weakPoints;
+        if (subject != null && !subject.isEmpty()) {
+            weakPoints = userWeakPointMapper.selectByUserIdAndSubject(userId, subject);
+        } else {
+            weakPoints = userWeakPointMapper.selectByUserId(userId);
+        }
+
+        // 构建节点
+        List<KnowledgeGraphVO.GraphNode> nodes = new ArrayList<>();
+        if (weakPoints != null) {
+            for (UserWeakPoint wp : weakPoints) {
+                double mastery = wp.getAccuracyRate() != null ? wp.getAccuracyRate().doubleValue() : 0.0;
+                String level = wp.getWeaknessLevel();
+                // 未练习过的标记为 UNKNOWN
+                if (wp.getTotalCount() == null || wp.getTotalCount() == 0) {
+                    level = "UNKNOWN";
+                    mastery = 0.0;
+                } else if (mastery >= 80.0) {
+                    level = "MASTERED";
+                }
+
+                nodes.add(KnowledgeGraphVO.GraphNode.builder()
+                        .id(wp.getKnowledgePoint())
+                        .name(wp.getKnowledgePoint())
+                        .subject(wp.getSubject())
+                        .weaknessLevel(level)
+                        .masteryRate(mastery)
+                        .group(wp.getSubject() != null ? wp.getSubject() : "其他")
+                        .build());
+            }
+        }
+
+        // 构建边：同科知识点按难度排序后建立前后连接
+        List<KnowledgeGraphVO.GraphEdge> edges = new ArrayList<>();
+
+        // 按学科分组构建知识链路
+        java.util.Map<String, java.util.List<UserWeakPoint>> bySubject = new java.util.LinkedHashMap<>();
+        if (weakPoints != null) {
+            for (UserWeakPoint wp : weakPoints) {
+                String s = wp.getSubject() != null ? wp.getSubject() : "其他";
+                bySubject.computeIfAbsent(s, k -> new ArrayList<>()).add(wp);
+            }
+        }
+
+        for (java.util.List<UserWeakPoint> sameSubject : bySubject.values()) {
+            // 同科知识点按薄弱程度排序：HIGH→MEDIUM→LOW→MASTERED
+            sameSubject.sort((a, b) -> {
+                int la = getWeaknessLevelWeight(a.getWeaknessLevel());
+                int lb = getWeaknessLevelWeight(b.getWeaknessLevel());
+                return Integer.compare(lb, la); // 降序：掌握差的在前
+            });
+
+            // 前后知识点建立 prerequisite 关系
+            for (int i = 0; i < sameSubject.size() - 1; i++) {
+                UserWeakPoint prev = sameSubject.get(i);
+                UserWeakPoint next = sameSubject.get(i + 1);
+                edges.add(KnowledgeGraphVO.GraphEdge.builder()
+                        .source(prev.getKnowledgePoint())
+                        .target(next.getKnowledgePoint())
+                        .relation("prerequisite")
+                        .build());
+            }
+        }
+
+        return KnowledgeGraphVO.builder()
+                .nodes(nodes)
+                .edges(edges)
+                .build();
+    }
+
+    private String sanitizeKey(String s) {
+        if (s == null) return "unknown";
+        return s.replaceAll("[^a-zA-Z0-9_\\u4e00-\\u9fa5]", "_");
     }
 }
