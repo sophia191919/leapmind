@@ -12,6 +12,7 @@ full result is written to the teaching_contents table.
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Optional
 
@@ -38,10 +39,10 @@ class PrepContext:
     subject: str
     grade: str
     knowledge_point_ids: list[int]
-    teaching_goals: list[str]
-    total_hours: int
-    style: str
-    weak_point_ids: list[int]
+    teaching_goals: list[str] = field(default_factory=list)
+    total_hours: int = 1
+    style: str = "standard"
+    weak_point_ids: list[int] = field(default_factory=list)
     user_profile_summary: Optional[str] = None
 
     # Stage outputs
@@ -56,9 +57,39 @@ class PrepContext:
 
 # ─── Event helpers ───
 
+def snake_to_camel(name: str) -> str:
+    """Convert snake_case to camelCase."""
+    parts = name.split("_")
+    return parts[0] + "".join(p.capitalize() for p in parts[1:])
+
+
+def convert_keys_camel(data: dict) -> dict:
+    """Recursively convert all dict keys from snake_case to camelCase."""
+    if not isinstance(data, dict):
+        return data
+    result = {}
+    for k, v in data.items():
+        camel_key = snake_to_camel(k)
+        if isinstance(v, dict):
+            result[camel_key] = convert_keys_camel(v)
+        elif isinstance(v, list):
+            result[camel_key] = [
+                convert_keys_camel(item) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            result[camel_key] = v
+    return result
+
+
 def _sse_event(event: str, data: dict) -> str:
-    """Format a Server-Sent Event string."""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    """Unified SSE format: data: {"type":"camelEventName", ...}
+
+    All events are wrapped inside data: with a type discriminator,
+    instead of using SSE's built-in event: line.
+    """
+    payload = {"type": snake_to_camel(event), **convert_keys_camel(data)}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 # ─── Main service ───
@@ -70,11 +101,18 @@ class LessonPrepService:
     PARALLEL_THRESHOLD = 3
 
     def __init__(self, parallel: bool = False, experiment: ABExperiment | None = None):
-        self.provider = get_ai_provider()
         self.parallel = parallel
         self.experiment = experiment
+        self._provider = None
         self._pipeline: ValidationPipeline | None = None
         self._executor: ParallelExecutor | None = None
+
+    @property
+    def provider(self):
+        """Lazy-init AI provider (avoids failure on import when no API key)."""
+        if self._provider is None:
+            self._provider = get_ai_provider()
+        return self._provider
 
     @property
     def pipeline(self) -> ValidationPipeline:
@@ -308,8 +346,8 @@ class LessonPrepService:
             return
 
         ctx.syllabus = syllabus
-        yield _sse_event("syllabus_done", {
-            "syllabus": syllabus,
+        yield _sse_event("outline", {
+            "content": syllabus,
             "sections_count": len(sections),
         })
 
@@ -608,3 +646,90 @@ class LessonPrepService:
             await session.commit()
             await session.refresh(record)
             return record.id
+
+    # ════════════════════════════════════════════════════════════
+    # [generate-ppt] Standalone PPT generation (non-streaming JSON)
+    # ════════════════════════════════════════════════════════════
+
+    async def generate_ppt(
+        self,
+        prep_id: int,
+        template_style: str = "default",
+        max_slides: int = 20,
+    ) -> tuple[int, list[dict]]:
+        """基于已有备课内容单独生成PPT结构（跳过Stage 1/3），非流式JSON返回。
+
+        从 teaching_contents 表读取已保存的 syllabus，
+        复用 _generate_single_slide 逻辑生成PPT，更新数据库后返回。
+
+        Args:
+            prep_id: 备课内容ID。
+            template_style: PPT模板风格（保留字段，暂未使用）。
+            max_slides: 最大页数（保留字段，暂未使用）。
+
+        Returns:
+            (ppt_id, slides) — ppt_id 与 prep_id 相同（同一备课记录），
+            slides 为 PPT 结构 JSON 数组。
+
+        Raises:
+            ValueError: 备课记录不存在或没有教学大纲数据。
+            Exception: AI生成或数据库写入失败。
+        """
+        from sqlalchemy import select, update
+        from ..database.database import AsyncSessionLocal
+        from ..database.models import TeachingContent
+
+        # 1. 读取备课记录
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(TeachingContent).where(TeachingContent.id == prep_id)
+            )
+            record = result.scalar_one_or_none()
+
+        if record is None:
+            raise ValueError(f"备课记录 {prep_id} 不存在")
+
+        # 2. 解析已保存的教学大纲
+        content = json.loads(record.generated_content_json or "{}")
+        syllabus = content.get("syllabus", {})
+        if not syllabus:
+            raise ValueError(f"备课记录 {prep_id} 中没有教学大纲数据，无法生成PPT")
+
+        # 3. 构造简版上下文
+        ppt_ctx = PrepContext(
+            user_id=record.user_id,
+            title=record.title,
+            subject="",
+            grade="",
+            knowledge_point_ids=[],
+            teaching_goals=[],
+        )
+        ppt_ctx.syllabus = syllabus
+
+        # 4. 复用 Stage 2 串行逻辑生成所有幻灯片
+        all_slides: list[dict] = []
+        for section in syllabus.get("sections", []):
+            slides_batch = await self._generate_single_slide(section, ppt_ctx)
+            for slide in slides_batch:
+                slide.setdefault("page_num", len(all_slides) + 1)
+                all_slides.append(slide)
+
+        ppt_ctx.slides = all_slides
+
+        # 5. 更新数据库中的 PPT 结构
+        if all_slides:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(TeachingContent)
+                    .where(TeachingContent.id == prep_id)
+                    .values(
+                        ppt_structure_json=json.dumps(
+                            all_slides, ensure_ascii=False
+                        ),
+                        updated_at=time.time(),
+                    )
+                )
+                await session.commit()
+
+        # 6. 返回 (pptId, slides)，pptId 复用 prepId
+        return prep_id, all_slides

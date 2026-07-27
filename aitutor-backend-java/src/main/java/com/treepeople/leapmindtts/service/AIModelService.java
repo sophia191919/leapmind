@@ -1,4 +1,4 @@
-package com.treepeople.leapmindtts.service.lesson;
+package com.treepeople.leapmindtts.service;
 
 import com.treepeople.leapmindtts.config.TextPolishingProperties;
 import lombok.AllArgsConstructor;
@@ -17,13 +17,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- *
+ * @ Author：YangYu
  * @ Package：com.treepeople.leapmindtts.service.Impl
  * @ Project：leapmind-tts
  * @ Description:
  * @ Date：2025/7/14  22:33
  */
-@Service("lessonAIModelService")
+@Service
 @Slf4j
 public class AIModelService {
     // 阿里云百炼平台API端点
@@ -62,11 +62,11 @@ public class AIModelService {
         DashScopeRequest request = new DashScopeRequest();
         request.setModel("qwen-turbo");
 
-
+        
         DashScopeRequest.Input input = new DashScopeRequest.Input();
         input.addMessage("user", userInput, aiPrompt);
         request.setInput(input);
-
+        
         DashScopeRequest.Parameters parameters = new DashScopeRequest.Parameters();
         parameters.setResult_format("text");
         request.setParameters(parameters);
@@ -94,8 +94,8 @@ public class AIModelService {
                     log.error("AI请求失败: {}", error.getMessage());
                     if (error instanceof org.springframework.web.reactive.function.client.WebClientResponseException) {
                         var webError = (org.springframework.web.reactive.function.client.WebClientResponseException) error;
-                        log.error("HTTP状态码: {}, 响应体: {}",
-                                webError.getStatusCode(),
+                        log.error("HTTP状态码: {}, 响应体: {}", 
+                                webError.getStatusCode(), 
                                 webError.getResponseBodyAsString());
                     }
                 })
@@ -165,7 +165,7 @@ public class AIModelService {
     /**
      * 文本润色方法
      * 使用通义千问API对文本进行润色处理，使其更适合教学场景
-     *
+     * 
      * @param originalText 原始文本
      * @return 润色后的文本，如果润色失败则返回原始文本
      */
@@ -181,7 +181,7 @@ public class AIModelService {
             log.warn("原始文本为null，返回空字符串");
             return Mono.just("");
         }
-
+        
         if (originalText.trim().isEmpty()) {
             log.warn("原始文本为空，返回原文");
             return Mono.just(originalText);
@@ -197,7 +197,7 @@ public class AIModelService {
         final String textToPolish;
         if (originalText.length() > textPolishingProperties.getValidation().getMaxTextLength()) {
             textToPolish = originalText.substring(0, textPolishingProperties.getValidation().getMaxTextLength());
-            log.warn("文本长度超过最大限制，已截断: originalLength={}, truncatedLength={}",
+            log.warn("文本长度超过最大限制，已截断: originalLength={}, truncatedLength={}", 
                     originalText.length(), textToPolish.length());
         } else {
             textToPolish = originalText;
@@ -233,7 +233,7 @@ public class AIModelService {
                 })
                 .doOnSuccess(polishedText -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    log.info("文本润色成功: originalLength={}, polishedLength={}, duration={}ms",
+                    log.info("文本润色成功: originalLength={}, polishedLength={}, duration={}ms", 
                             textToPolish.length(), polishedText.length(), duration);
                 })
                 .doOnError(error -> {
@@ -249,7 +249,7 @@ public class AIModelService {
     private Mono<String> performPolishingRequest(String textToPolish, String prompt) {
         // 构建润色请求
         DashScopeRequest request = buildPolishingRequest(textToPolish, prompt);
-
+        
         log.debug("发送润色请求: textLength={}", textToPolish.length());
 
         return webClient.post()
@@ -273,7 +273,7 @@ public class AIModelService {
                 .doOnError(error -> {
                     if (error instanceof WebClientResponseException) {
                         var webError = (WebClientResponseException) error;
-                        log.error("润色请求失败: statusCode={}, responseBody={}",
+                        log.error("润色请求失败: statusCode={}, responseBody={}", 
                                 webError.getStatusCode(), webError.getResponseBodyAsString());
                     } else {
                         log.error("润色请求失败: {}", error.getMessage());
@@ -353,11 +353,11 @@ public class AIModelService {
                         cap = Math.min(cap, maxOutputChars);
                     }
                     if (polishedText != null && polishedText.length() > cap) {
-                        log.warn("润色文本超出字数限制，原文{}字，润色后{}字，上限{}字，将进行截断",
+                        log.warn("润色文本超出字数限制，原文{}字，润色后{}字，上限{}字，将进行截断", 
                                 originalText.length(), polishedText.length(), cap);
-
+                        
                         String truncated = polishedText.substring(0, cap).trim();
-                        int lastBreak = Math.max(Math.max(truncated.lastIndexOf('。'), truncated.lastIndexOf('\n')),
+                        int lastBreak = Math.max(Math.max(truncated.lastIndexOf('。'), truncated.lastIndexOf('\n')), 
                                 Math.max(truncated.lastIndexOf('！'), truncated.lastIndexOf('？')));
                         if (lastBreak > cap / 2) {
                             truncated = truncated.substring(0, lastBreak + 1).trim();
@@ -388,9 +388,9 @@ public class AIModelService {
         if (rawText == null || rawText.trim().isEmpty()) {
             return rawText;
         }
-
+        
         String cleanedText = rawText.trim();
-
+        
         // 去除常见的引导语模式
         String[] unwantedPrefixes = {
             "当然可以，下面是",
@@ -403,7 +403,7 @@ public class AIModelService {
             "将这段文字润色后",
             "润色为适合老师讲课的内容"
         };
-
+        
         // 检查并移除引导语
         for (String prefix : unwantedPrefixes) {
             if (cleanedText.toLowerCase().contains(prefix.toLowerCase())) {
@@ -411,19 +411,19 @@ public class AIModelService {
                 int colonIndex = cleanedText.indexOf("：");
                 int colonIndex2 = cleanedText.indexOf(":");
                 int newlineIndex = cleanedText.indexOf("\n");
-
+                
                 int startIndex = -1;
                 if (colonIndex > 0) startIndex = colonIndex + 1;
                 else if (colonIndex2 > 0) startIndex = colonIndex2 + 1;
                 else if (newlineIndex > 0) startIndex = newlineIndex + 1;
-
+                
                 if (startIndex > 0 && startIndex < cleanedText.length()) {
                     cleanedText = cleanedText.substring(startIndex).trim();
                     break;
                 }
             }
         }
-
+        
         // 去除结尾的说明文字
         String[] unwantedSuffixes = {
             "如果你有更多内容需要润色，也可以继续发给我",
@@ -437,7 +437,7 @@ public class AIModelService {
             "并加入了适当的解释和过渡",
             "有助于学生更好地理解和吸收知识点"
         };
-
+        
         for (String suffix : unwantedSuffixes) {
             if (cleanedText.toLowerCase().contains(suffix.toLowerCase())) {
                 int index = cleanedText.toLowerCase().indexOf(suffix.toLowerCase());
@@ -454,19 +454,19 @@ public class AIModelService {
                 }
             }
         }
-
+        
         // 去除开头和结尾的分隔符
         cleanedText = cleanedText.replaceAll("^---\\s*\\n*", ""); // 去除开头的---
         cleanedText = cleanedText.replaceAll("\\n*\\s*---\\s*$", ""); // 去除结尾的---
         cleanedText = cleanedText.replaceAll("\\n*\\s*---\\s*\\n+", "\n\n"); // 去除中间的---分隔符
-
+        
         // 去除markdown格式标记
         cleanedText = cleanedText.replaceAll("\\*\\*(.*?)\\*\\*", "$1"); // 去除加粗
         cleanedText = cleanedText.replaceAll("\\*(.*?)\\*", "$1"); // 去除斜体
-
+        
         // 去除多余的换行符
         cleanedText = cleanedText.replaceAll("\\n{3,}", "\n\n"); // 将3个或更多换行符替换为2个
-
+        
         // 去除包含特定模式的整个段落或句子
         String[] unwantedParagraphs = {
             "这样的表达方式更贴近课堂讲解",
@@ -477,24 +477,24 @@ public class AIModelService {
             "大家有没有兴趣继续了解呢",
             "我们可以从它和传统单体架构的区别开始讲起"
         };
-
+        
         for (String unwantedParagraph : unwantedParagraphs) {
             // 使用正则表达式匹配包含这些内容的整个段落
             String pattern = ".*" + java.util.regex.Pattern.quote(unwantedParagraph) + ".*?(?=\\n\\n|$)";
             cleanedText = cleanedText.replaceAll(pattern, "");
         }
-
+        
         // 去除结尾的问号句子（通常是AI添加的互动问题）
         cleanedText = cleanedText.replaceAll("，[^。！？]*？[？！]?$", "。");
         cleanedText = cleanedText.replaceAll("[^。！]*？[？！]?$", "");
-
+        
         // 最终清理：去除首尾空白和多余换行
         cleanedText = cleanedText.trim();
         cleanedText = cleanedText.replaceAll("^\\n+", ""); // 去除开头的换行
         cleanedText = cleanedText.replaceAll("\\n+$", ""); // 去除结尾的换行
-
+        
         log.debug("文本清理: 原长度={}, 清理后长度={}", rawText.length(), cleanedText.length());
-
+        
         return cleanedText;
     }
 
@@ -509,7 +509,7 @@ public class AIModelService {
             return statusCode >= 500 || statusCode == 429;
         }
         // 网络连接异常可以重试
-        return error instanceof java.net.ConnectException ||
+        return error instanceof java.net.ConnectException || 
                error instanceof java.util.concurrent.TimeoutException;
     }
 
@@ -531,7 +531,7 @@ public class AIModelService {
                 String fullContent = (prompt != null && !prompt.trim().isEmpty()) ? prompt + content : content;
                 messages.add(new Message(role, fullContent));
             }
-
+            
             public void addMessage(String role, String content) {
                 messages.add(new Message(role, content));
             }
