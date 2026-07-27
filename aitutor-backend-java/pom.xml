@@ -1,53 +1,117 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.1.5</version>
-        <relativePath/>
+ <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+     <modelVersion>4.0.0</modelVersion>
+     <parent>
+         <groupId>org.springframework.boot</groupId>
+         <artifactId>spring-boot-starter-parent</artifactId>
+         <version>3.1.5</version>
+         <relativePath/>
         <!-- lookup parent from repository -->
-    </parent>
-    <groupId>com.treepeople</groupId>
-    <artifactId>leapmind-tts</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
-    <name>leapmind-tts</name>
-    <description>leapmind-tts</description>
-    <url/>
-    <licenses>
-        <license/>
-    </licenses>
-    <developers>
-        <developer/>
-    </developers>
-    <scm>
-        <connection/>
-        <developerConnection/>
-        <tag/>
-        <url/>
-    </scm>
-    <properties>
-        <java.version>17</java.version>
-        <spring-cloud.version>2022.0.4</spring-cloud.version>
+     </parent>
+     <groupId>com.treepeople</groupId>
+     <artifactId>leapmind-tts</artifactId>
+     <version>0.0.1-SNAPSHOT</version>
+     <name>leapmind-tts</name>
+     <description>leapmind-tts</description>
+     <url/>
+     <licenses>
+         <license/>
+     </licenses>
+     <developers>
+         <developer/>
+     </developers>
+     <scm>
+         <connection/>
+         <developerConnection/>
+         <tag/>
+         <url/>
+     </scm>
+     <properties>
+         <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+         <spring-cloud.version>2022.0.4</spring-cloud.version>
         <maven.compiler.encoding>UTF-8</maven.compiler.encoding>
         <lombok.version>1.18.42</lombok.version>
-    </properties>
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.cloud</groupId>
-                <artifactId>spring-cloud-dependencies</artifactId>
-                <version>${spring-cloud.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
-    <dependencies>
+     </properties>
+     <dependencyManagement>
+         <dependencies>
+             <dependency>
+                 <groupId>org.springframework.cloud</groupId>
+                 <artifactId>spring-cloud-dependencies</artifactId>
+                 <version>${spring-cloud.version}</version>
+                 <type>pom</type>
+                 <scope>import</scope>
+             </dependency>
+         </dependencies>
+     </dependencyManagement>
+     <dependencies>
+         <dependency>
+             <groupId>org.springframework.boot</groupId>
+             <artifactId>spring-boot-starter-web</artifactId>
+         </dependency>
+
+         <!-- Caching -->
+         <dependency>
+             <groupId>org.springframework.boot</groupId>
+             <artifactId>spring-boot-starter-cache</artifactId>
+         </dependency>
+         <dependency>
+             <groupId>com.github.ben-manes.caffeine</groupId>
+             <artifactId>caffeine</artifactId>
+         </dependency>
+
+         <!-- Redis -->
+         <dependency>
+             <groupId>org.springframework.boot</groupId>
+             <artifactId>spring-boot-starter-data-redis</artifactId>
+         </dependency>
+
+         <!-- Monitoring -->
+         <dependency>
+             <groupId>org.springframework.boot</groupId>
+             <artifactId>spring-boot-starter-actuator</artifactId>
+         </dependency>
+         <dependency>
+             <groupId>io.micrometer</groupId>
+             <artifactId>micrometer-registry-prometheus</artifactId>
+         </dependency>
+
+         <!-- 1. Resilience4j 核心依赖（版本统一） -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot3</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-all</artifactId>
+            <version>2.2.0</version>
+        </dependency>
+
+         <!-- 3. Resilience4j 的注解(@CircuitBreaker等)底层强依赖 Spring AOP -->
+         <dependency>
+             <groupId>org.springframework.boot</groupId>
+             <artifactId>spring-boot-starter-aop</artifactId>
+         </dependency>
+        <!-- M8 TTS 缓存 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- M8 TTS 音频对象存储 -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.7</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+            <version>3.5.4</version>
         </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
@@ -219,6 +283,8 @@
             <artifactId>flyway-mysql</artifactId>
         </dependency>
     </dependencies>
+     <build>
+         <plugins>
     <build>
         <resources>
             <resource>
@@ -234,15 +300,39 @@
         </resources>
         <plugins>
             <!-- 编译插件：升级3.12.1修复TypeTag UNKNOWN报错 -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
+             <plugin>
+                 <groupId>org.apache.maven.plugins</groupId>
+                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.12.1</version>
-                <configuration>
+                 <configuration>
                     <source>${java.version}</source>
                     <target>${java.version}</target>
                     <!-- <release>${java.version}</release> -->
                     <encoding>${maven.compiler.encoding}</encoding>
+                     <annotationProcessorPaths>
+                         <path>
+                             <groupId>org.projectlombok</groupId>
+                             <artifactId>lombok</artifactId>
+                             <version>${lombok.version}</version>
+                         </path>
+                     </annotationProcessorPaths>
+                 </configuration>
+             </plugin>
+             <plugin>
+                 <groupId>org.springframework.boot</groupId>
+                 <artifactId>spring-boot-maven-plugin</artifactId>
+                 <configuration>
+                     <excludes>
+                         <exclude>
+                             <groupId>org.projectlombok</groupId>
+                             <artifactId>lombok</artifactId>
+                         </exclude>
+                     </excludes>
+                 </configuration>
+             </plugin>
+         </plugins>
+     </build>
+ </project>
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>
