@@ -100,4 +100,28 @@ public class SpringDocConfig {
                 .pathsToMatch("/api/admin/**", "/admin/**", "/api/admin/review/**")
                 .build();
     }
+
+    /**
+     * 薄弱点分析接口 — 薄弱点查询、AI分析和练习推荐
+     */
+    @Bean
+    public GroupedOpenApi weakPointsApi() {
+        return GroupedOpenApi.builder()
+                .group("5-薄弱点分析")
+                .displayName("薄弱点分析接口")
+                .pathsToMatch("/api/weak-points/**", "/api/exercises/**")
+                .build();
+    }
+
+    /**
+     * M6 用户画像接口
+     */
+    @Bean
+    public GroupedOpenApi m6ProfileApi() {
+        return GroupedOpenApi.builder()
+                .group("m6-user-profile")
+                .displayName("M6 用户画像")
+                .pathsToMatch("/api/user-profile/**")
+                .build();
+    }
 }
