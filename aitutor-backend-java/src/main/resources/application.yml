@@ -240,6 +240,7 @@ virtual-teacher:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:leapmind-tts}
+=======
 
 # Python AI 服务配置（复习计算、事件处理）
 python-service:

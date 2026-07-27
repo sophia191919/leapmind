@@ -24,9 +24,9 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
     public RateLimitInterceptor(RateLimiterRegistry rateLimiterRegistry) {
         this.rateLimiterRegistry = rateLimiterRegistry;
-        // 获取 YAML 或配置类中定义的默认配置
+        // 修改为：如果找不到 user-rate-limiter，就优雅降级使用默认配置 (getDefaultConfig)
         this.rateLimiterConfig = rateLimiterRegistry.getConfiguration("user-rate-limiter")
-            .orElseThrow(() -> new IllegalStateException("Rate limiter configuration 'user-rate-limiter' not found"));
+                .orElseGet(rateLimiterRegistry::getDefaultConfig);
     }
 
     @Override
