@@ -1,8 +1,6 @@
-package com.treepeople.leapmindtts.service.lesson;
+package com.treepeople.leapmindtts.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.config.TextPolishingProperties;
-import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.InputType;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -11,29 +9,25 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 
 /**
- *
+ * @ Author：YangYu
  * @ Package：com.treepeople.leapmindtts.service.Impl
  * @ Project：leapmind-tts
  * @ Description:
  * @ Date：2025/7/14  22:33
  */
-@Service("lessonAIModelService")
+@Service
 @Slf4j
 public class AIModelService {
     // 阿里云百炼平台API端点
     private static final String AI_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
-    private static final String VL_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
 
     @Value("${ai.api.key}")
     private String apiKey;
@@ -43,12 +37,10 @@ public class AIModelService {
 
     private final WebClient webClient;
     private final TextPolishingProperties textPolishingProperties;
-    private final ObjectMapper objectMapper;
 
-    public AIModelService(WebClient.Builder webClientBuilder, TextPolishingProperties textPolishingProperties, ObjectMapper objectMapper) {
+    public AIModelService(WebClient.Builder webClientBuilder, TextPolishingProperties textPolishingProperties) {
         this.webClient = webClientBuilder.build();
         this.textPolishingProperties = textPolishingProperties;
-        this.objectMapper = objectMapper;
     }
 
     public Mono<String> getAIResponse(String userInput) {
@@ -70,11 +62,11 @@ public class AIModelService {
         DashScopeRequest request = new DashScopeRequest();
         request.setModel("qwen-turbo");
 
-
+        
         DashScopeRequest.Input input = new DashScopeRequest.Input();
         input.addMessage("user", userInput, aiPrompt);
         request.setInput(input);
-
+        
         DashScopeRequest.Parameters parameters = new DashScopeRequest.Parameters();
         parameters.setResult_format("text");
         request.setParameters(parameters);
@@ -102,8 +94,8 @@ public class AIModelService {
                     log.error("AI请求失败: {}", error.getMessage());
                     if (error instanceof org.springframework.web.reactive.function.client.WebClientResponseException) {
                         var webError = (org.springframework.web.reactive.function.client.WebClientResponseException) error;
-                        log.error("HTTP状态码: {}, 响应体: {}",
-                                webError.getStatusCode(),
+                        log.error("HTTP状态码: {}, 响应体: {}", 
+                                webError.getStatusCode(), 
                                 webError.getResponseBodyAsString());
                     }
                 })
@@ -171,191 +163,9 @@ public class AIModelService {
     }
 
     /**
-     * 流式 AI 响应
-     * 调用阿里云 DashScope 流式 API，返回增量文本块及 token 用量
-     */
-    public Flux<AiChunk> streamAIResponse(List<Map<String, String>> messages, InputType inputType, List<String> attachmentUrls) {
-        if (messages == null || messages.isEmpty()) {
-            log.warn("消息列表为空，返回空流");
-            return Flux.empty();
-        }
-        if (apiKey == null || apiKey.trim().isEmpty()) {
-            log.error("AI API Key未配置");
-            return Flux.just(new AiChunk("抱歉，AI服务暂时不可用。", true, null, null));
-        }
-
-        boolean isImage = inputType == InputType.image && attachmentUrls != null && !attachmentUrls.isEmpty();
-        log.info("发送流式AI请求: messagesCount={}, isImage={}", messages.size(), isImage);
-        var body = buildStreamingBody(messages, isImage, attachmentUrls);
-
-        return webClient.post()
-                .uri(isImage ? VL_API_URL : AI_API_URL)
-                .header("Authorization", "Bearer " + apiKey)
-                .header("X-DashScope-SSE", "enable")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body)
-                .retrieve()
-                .onStatus(status -> !status.is2xxSuccessful(), response ->
-                    response.bodyToMono(String.class).flatMap(errBody -> {
-                        log.error("DashScope HTTP {} body: {}", response.statusCode(), errBody);
-                        return Mono.error(new RuntimeException(
-                            "DashScope API error (HTTP " + response.statusCode() + "): " + errBody));
-                    })
-                )
-                .bodyToFlux(String.class)
-                .flatMap((String event) -> {
-                    if (event == null || event.trim().isEmpty()) {
-                        return Flux.empty();
-                    }
-                    List<AiChunk> chunks = new ArrayList<>();
-                    // DashScope 返回的是逐行 JSON（无 data: 前缀），每行独立解析
-                    for (String line : event.split("\n")) {
-                        String trimmed = line.trim();
-                        if (trimmed.isEmpty()) continue;
-                        try {
-                            var json = objectMapper.readTree(trimmed);
-
-                            log.info("=== DashScope RAW: {}", trimmed.substring(0, Math.min(200, trimmed.length())));
-
-                            var errCode = json.path("code").asText();
-                            if (!errCode.isEmpty()) {
-                                var errMsg = json.path("message").asText();
-                                log.error("DashScope API error: code={}, message={}", errCode, errMsg);
-                                chunks.add(new AiChunk(
-                                    "DashScope API error: " + errCode + " - " + errMsg, true, 0, 0));
-                                continue;
-                            }
-
-                            var choices = json.path("output").path("choices");
-                            String text = "";
-                            if (choices.isArray() && choices.size() > 0) {
-                                var contentNode = choices.get(0).path("message").path("content");
-                                if (contentNode.isArray()) {
-                                    StringBuilder sb = new StringBuilder();
-                                    for (var part : contentNode) {
-                                        sb.append(part.path("text").asText());
-                                    }
-                                    text = sb.toString();
-                                } else {
-                                    text = contentNode.asText();
-                                }
-                            } else {
-                                text = json.path("output").path("text").asText();
-                            }
-
-                            String finishReason = choices.isArray() && choices.size() > 0
-                                ? choices.get(0).path("finish_reason").asText("null") : "null";
-                            boolean isLast = !"null".equals(finishReason);
-
-                            Integer inTokens = null, outTokens = null;
-                            var usage = json.path("usage");
-                            if (!usage.isMissingNode() && !usage.isNull()) {
-                                var inNode = usage.path("input_tokens");
-                                var outNode = usage.path("output_tokens");
-                                if (inNode.isInt()) inTokens = inNode.asInt();
-                                if (outNode.isInt()) outTokens = outNode.asInt();
-                            }
-
-                            if (text.isEmpty()) {
-                                if (isLast) {
-                                    chunks.add(new AiChunk("", true, inTokens, outTokens));
-                                }
-                                continue;
-                            }
-                            chunks.add(new AiChunk(text, isLast, inTokens, outTokens));
-                        } catch (Exception e) {
-                            log.warn("解析流式响应行失败: {}", e.getMessage());
-                        }
-                    }
-                    return Flux.fromIterable(chunks);
-                })
-                .doOnNext(chunk -> log.info("流式AI块: {}", chunk.getChunk()))
-                .doOnComplete(() -> log.info("流式AI响应完成"))
-                .doOnError(err -> log.error("流式AI请求失败: {}", err.getMessage()));
-    }
-
-    private Object buildStreamingBody(List<Map<String, String>> messages, boolean isImage, List<String> attachmentUrls) {
-        var request = new DashScopeStreamRequest();
-        request.setModel(isImage ? "qwen-vl-plus" : "qwen-turbo");
-
-        var input = new DashScopeStreamRequest.Input();
-        for (int i = 0; i < messages.size() - 1; i++) {
-            var msg = messages.get(i);
-            input.addMessage(msg.get("role"), msg.get("content"));
-        }
-        if (!messages.isEmpty()) {
-            var last = messages.get(messages.size() - 1);
-            if (isImage) {
-                input.addMultiModalMessage(last.get("role"), last.get("content"), attachmentUrls);
-            } else {
-                input.addMessage(last.get("role"), last.get("content"));
-            }
-        }
-        request.setInput(input);
-
-        var params = new DashScopeStreamRequest.Parameters();
-        params.setResult_format("message");
-        params.setIncremental_output(true);
-        request.setParameters(params);
-
-        return request;
-    }
-
-    @Data
-    @AllArgsConstructor
-    public static class AiChunk {
-        private String chunk;
-        private boolean last;
-        private Integer inputTokens;
-        private Integer outputTokens;
-    }
-
-    @Data
-    private static class DashScopeStreamRequest {
-        private String model;
-        private Input input;
-        private Parameters parameters;
-
-        @Data
-        public static class Input {
-            private List<Message> messages = new ArrayList<>();
-
-            public void addMessage(String role, String content) {
-                messages.add(new Message(role, content));
-            }
-
-            public void addMultiModalMessage(String role, String text, List<String> imageUrls) {
-                List<Map<String, String>> contentParts = new ArrayList<>();
-                if (imageUrls != null) {
-                    for (String url : imageUrls) {
-                        contentParts.add(Map.of("image", url));
-                    }
-                }
-                if (text != null && !text.isEmpty()) {
-                    contentParts.add(Map.of("text", text));
-                }
-                messages.add(new Message(role, contentParts));
-            }
-
-            @Data
-            @AllArgsConstructor
-            public static class Message {
-                private String role;
-                private Object content;
-            }
-        }
-
-        @Data
-        public static class Parameters {
-            private String result_format;
-            private Boolean incremental_output;
-        }
-    }
-
-    /**
      * 文本润色方法
      * 使用通义千问API对文本进行润色处理，使其更适合教学场景
-     *
+     * 
      * @param originalText 原始文本
      * @return 润色后的文本，如果润色失败则返回原始文本
      */
@@ -371,7 +181,7 @@ public class AIModelService {
             log.warn("原始文本为null，返回空字符串");
             return Mono.just("");
         }
-
+        
         if (originalText.trim().isEmpty()) {
             log.warn("原始文本为空，返回原文");
             return Mono.just(originalText);
@@ -387,7 +197,7 @@ public class AIModelService {
         final String textToPolish;
         if (originalText.length() > textPolishingProperties.getValidation().getMaxTextLength()) {
             textToPolish = originalText.substring(0, textPolishingProperties.getValidation().getMaxTextLength());
-            log.warn("文本长度超过最大限制，已截断: originalLength={}, truncatedLength={}",
+            log.warn("文本长度超过最大限制，已截断: originalLength={}, truncatedLength={}", 
                     originalText.length(), textToPolish.length());
         } else {
             textToPolish = originalText;
@@ -423,7 +233,7 @@ public class AIModelService {
                 })
                 .doOnSuccess(polishedText -> {
                     long duration = System.currentTimeMillis() - startTime;
-                    log.info("文本润色成功: originalLength={}, polishedLength={}, duration={}ms",
+                    log.info("文本润色成功: originalLength={}, polishedLength={}, duration={}ms", 
                             textToPolish.length(), polishedText.length(), duration);
                 })
                 .doOnError(error -> {
@@ -439,7 +249,7 @@ public class AIModelService {
     private Mono<String> performPolishingRequest(String textToPolish, String prompt) {
         // 构建润色请求
         DashScopeRequest request = buildPolishingRequest(textToPolish, prompt);
-
+        
         log.debug("发送润色请求: textLength={}", textToPolish.length());
 
         return webClient.post()
@@ -463,7 +273,7 @@ public class AIModelService {
                 .doOnError(error -> {
                     if (error instanceof WebClientResponseException) {
                         var webError = (WebClientResponseException) error;
-                        log.error("润色请求失败: statusCode={}, responseBody={}",
+                        log.error("润色请求失败: statusCode={}, responseBody={}", 
                                 webError.getStatusCode(), webError.getResponseBodyAsString());
                     } else {
                         log.error("润色请求失败: {}", error.getMessage());
@@ -543,11 +353,11 @@ public class AIModelService {
                         cap = Math.min(cap, maxOutputChars);
                     }
                     if (polishedText != null && polishedText.length() > cap) {
-                        log.warn("润色文本超出字数限制，原文{}字，润色后{}字，上限{}字，将进行截断",
+                        log.warn("润色文本超出字数限制，原文{}字，润色后{}字，上限{}字，将进行截断", 
                                 originalText.length(), polishedText.length(), cap);
-
+                        
                         String truncated = polishedText.substring(0, cap).trim();
-                        int lastBreak = Math.max(Math.max(truncated.lastIndexOf('。'), truncated.lastIndexOf('\n')),
+                        int lastBreak = Math.max(Math.max(truncated.lastIndexOf('。'), truncated.lastIndexOf('\n')), 
                                 Math.max(truncated.lastIndexOf('！'), truncated.lastIndexOf('？')));
                         if (lastBreak > cap / 2) {
                             truncated = truncated.substring(0, lastBreak + 1).trim();
@@ -578,9 +388,9 @@ public class AIModelService {
         if (rawText == null || rawText.trim().isEmpty()) {
             return rawText;
         }
-
+        
         String cleanedText = rawText.trim();
-
+        
         // 去除常见的引导语模式
         String[] unwantedPrefixes = {
             "当然可以，下面是",
@@ -593,7 +403,7 @@ public class AIModelService {
             "将这段文字润色后",
             "润色为适合老师讲课的内容"
         };
-
+        
         // 检查并移除引导语
         for (String prefix : unwantedPrefixes) {
             if (cleanedText.toLowerCase().contains(prefix.toLowerCase())) {
@@ -601,19 +411,19 @@ public class AIModelService {
                 int colonIndex = cleanedText.indexOf("：");
                 int colonIndex2 = cleanedText.indexOf(":");
                 int newlineIndex = cleanedText.indexOf("\n");
-
+                
                 int startIndex = -1;
                 if (colonIndex > 0) startIndex = colonIndex + 1;
                 else if (colonIndex2 > 0) startIndex = colonIndex2 + 1;
                 else if (newlineIndex > 0) startIndex = newlineIndex + 1;
-
+                
                 if (startIndex > 0 && startIndex < cleanedText.length()) {
                     cleanedText = cleanedText.substring(startIndex).trim();
                     break;
                 }
             }
         }
-
+        
         // 去除结尾的说明文字
         String[] unwantedSuffixes = {
             "如果你有更多内容需要润色，也可以继续发给我",
@@ -627,7 +437,7 @@ public class AIModelService {
             "并加入了适当的解释和过渡",
             "有助于学生更好地理解和吸收知识点"
         };
-
+        
         for (String suffix : unwantedSuffixes) {
             if (cleanedText.toLowerCase().contains(suffix.toLowerCase())) {
                 int index = cleanedText.toLowerCase().indexOf(suffix.toLowerCase());
@@ -644,19 +454,19 @@ public class AIModelService {
                 }
             }
         }
-
+        
         // 去除开头和结尾的分隔符
         cleanedText = cleanedText.replaceAll("^---\\s*\\n*", ""); // 去除开头的---
         cleanedText = cleanedText.replaceAll("\\n*\\s*---\\s*$", ""); // 去除结尾的---
         cleanedText = cleanedText.replaceAll("\\n*\\s*---\\s*\\n+", "\n\n"); // 去除中间的---分隔符
-
+        
         // 去除markdown格式标记
         cleanedText = cleanedText.replaceAll("\\*\\*(.*?)\\*\\*", "$1"); // 去除加粗
         cleanedText = cleanedText.replaceAll("\\*(.*?)\\*", "$1"); // 去除斜体
-
+        
         // 去除多余的换行符
         cleanedText = cleanedText.replaceAll("\\n{3,}", "\n\n"); // 将3个或更多换行符替换为2个
-
+        
         // 去除包含特定模式的整个段落或句子
         String[] unwantedParagraphs = {
             "这样的表达方式更贴近课堂讲解",
@@ -667,24 +477,24 @@ public class AIModelService {
             "大家有没有兴趣继续了解呢",
             "我们可以从它和传统单体架构的区别开始讲起"
         };
-
+        
         for (String unwantedParagraph : unwantedParagraphs) {
             // 使用正则表达式匹配包含这些内容的整个段落
             String pattern = ".*" + java.util.regex.Pattern.quote(unwantedParagraph) + ".*?(?=\\n\\n|$)";
             cleanedText = cleanedText.replaceAll(pattern, "");
         }
-
+        
         // 去除结尾的问号句子（通常是AI添加的互动问题）
         cleanedText = cleanedText.replaceAll("，[^。！？]*？[？！]?$", "。");
         cleanedText = cleanedText.replaceAll("[^。！]*？[？！]?$", "");
-
+        
         // 最终清理：去除首尾空白和多余换行
         cleanedText = cleanedText.trim();
         cleanedText = cleanedText.replaceAll("^\\n+", ""); // 去除开头的换行
         cleanedText = cleanedText.replaceAll("\\n+$", ""); // 去除结尾的换行
-
+        
         log.debug("文本清理: 原长度={}, 清理后长度={}", rawText.length(), cleanedText.length());
-
+        
         return cleanedText;
     }
 
@@ -699,7 +509,7 @@ public class AIModelService {
             return statusCode >= 500 || statusCode == 429;
         }
         // 网络连接异常可以重试
-        return error instanceof java.net.ConnectException ||
+        return error instanceof java.net.ConnectException || 
                error instanceof java.util.concurrent.TimeoutException;
     }
 
@@ -721,7 +531,7 @@ public class AIModelService {
                 String fullContent = (prompt != null && !prompt.trim().isEmpty()) ? prompt + content : content;
                 messages.add(new Message(role, fullContent));
             }
-
+            
             public void addMessage(String role, String content) {
                 messages.add(new Message(role, content));
             }
