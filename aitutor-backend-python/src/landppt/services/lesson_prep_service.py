@@ -205,7 +205,15 @@ class LessonPrepService:
         weak_point_ids: list[int] | None = None,
         user_profile_summary: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Main entry: run all three stages and emit SSE events."""
+        """Main entry: generate syllabus and emit structured SSE events.
+
+        Event flow:
+          data: {"type":"outline","content":{...}}
+          data: {"type":"section","index":1,"title":"...","content":{...}}
+          data: {"type":"section","index":2,"title":"...","content":{...}}
+          ...
+          data: {"type":"done","prepId":301}
+        """
         ctx = PrepContext(
             user_id=user_id,
             title=title,
@@ -220,55 +228,16 @@ class LessonPrepService:
         )
 
         try:
-            # Stage 1
+            # Stage 1: Syllabus generation (outline + section events)
             async for event in self._stage1_syllabus(ctx):
                 yield event
 
-            # Stage 2 (only if Stage 1 succeeded)
+            # Save to database and emit done
             if ctx.syllabus:
-                async for event in self._stage2_slides(ctx):
-                    yield event
-
-            # Stage 3 (only if Stage 2 produced slides)
-            if ctx.slides:
-                async for event in self._stage3_narrations(ctx):
-                    yield event
-
-            # ── [Layer 2] Final combined validation ──
-            if ctx.slides:
-                final_vr = await self.pipeline.validate(
-                    "final", {
-                        "syllabus": ctx.syllabus,
-                        "slides": ctx.slides,
-                        "narrations": ctx.narrations,
-                    },
-                )
-                if final_vr.warnings:
-                    ctx.warnings.append({"stage": "final", "warnings": final_vr.warnings})
-                    for w in final_vr.warnings:
-                        yield _sse_event("warn", {
-                            "stage": "final",
-                            "validator": "final_check",
-                            "message": w,
-                        })
-                yield _sse_event("final_check", {
-                    "passed": final_vr.passed,
-                    "overall_score": round(final_vr.overall_score, 3),
-                    "warnings": final_vr.warnings,
-                })
-
-            # Database write
-            if ctx.slides:
                 try:
                     prep_id = await self._save_to_db(ctx)
-                    total_seconds = sum(
-                        n.get("estimated_duration_seconds", 0) or 0
-                        for n in (ctx.narrations or [])
-                    )
                     yield _sse_event("done", {
                         "prep_id": prep_id,
-                        "total_pages": len(ctx.slides),
-                        "total_duration_seconds": total_seconds,
                     })
                 except Exception as e:
                     logger.exception("Database write failed")
@@ -289,7 +258,7 @@ class LessonPrepService:
     # ════════════════════════════════════════════════════════════
 
     async def _stage1_syllabus(self, ctx: PrepContext) -> AsyncGenerator[str, None]:
-        """Generate syllabus with streaming tokens, then yield the full JSON."""
+        """Generate syllabus via streaming AI, yield outline + per-section events."""
         messages = build_stage1_messages(
             subject=ctx.subject,
             grade=ctx.grade,
@@ -305,7 +274,6 @@ class LessonPrepService:
         try:
             async for chunk in self.provider.stream_chat_completion(messages):
                 full_content += chunk
-                yield _sse_event("syllabus_chunk", {"chunk": chunk})
         except Exception as e:
             logger.exception("Stage 1 (syllabus) streaming failed")
             yield _sse_event("error", {"stage": "stage1", "message": f"大纲生成失败: {e}"})
@@ -322,19 +290,13 @@ class LessonPrepService:
             })
             return
 
-        # ── [Layer 2] Validate syllabus schema ──
+        # ── [Layer 2] Validate syllabus schema (silent auto-fix) ──
         vr = await self.pipeline.validate("syllabus", syllabus)
-        if vr.warnings:
-            ctx.warnings.append({"stage": "stage1", "warnings": vr.warnings})
-            for w in vr.warnings:
-                yield _sse_event("warn", {
-                    "stage": "stage1",
-                    "validator": "syllabus_schema",
-                    "message": w,
-                })
         if vr.fixes_applied:
             syllabus = self.pipeline.get_fixed_data("syllabus", syllabus)
             ctx.warnings.append({"stage": "stage1", "fixes": vr.fixes_applied})
+        if vr.warnings:
+            ctx.warnings.append({"stage": "stage1", "warnings": vr.warnings})
 
         # Basic validation
         sections = syllabus.get("sections", [])
@@ -346,10 +308,19 @@ class LessonPrepService:
             return
 
         ctx.syllabus = syllabus
+
+        # Emit outline event (full syllabus)
         yield _sse_event("outline", {
             "content": syllabus,
-            "sections_count": len(sections),
         })
+
+        # Emit per-section events
+        for idx, section in enumerate(sections):
+            yield _sse_event("section", {
+                "index": idx + 1,
+                "title": section.get("title", ""),
+                "content": section,
+            })
 
     # ════════════════════════════════════════════════════════════
     # Stage 2: PPT slide generation (per-section batch, per-slide yield)
@@ -613,7 +584,7 @@ class LessonPrepService:
     # ════════════════════════════════════════════════════════════
 
     async def _save_to_db(self, ctx: PrepContext) -> int:
-        """Write the full preparation result to teaching_contents table."""
+        """Write the syllabus to teaching_contents table (PPT/narrations generated separately)."""
         from ..database.database import AsyncSessionLocal
         from ..database.models import TeachingContent
 
@@ -636,10 +607,8 @@ class LessonPrepService:
                 }, ensure_ascii=False),
                 generated_content_json=json.dumps({
                     "syllabus": ctx.syllabus,
-                    "slides": ctx.slides,
-                    "narrations": ctx.narrations,
                 }, ensure_ascii=False),
-                ppt_structure_json=json.dumps(ctx.slides, ensure_ascii=False),
+                ppt_structure_json=json.dumps([]),
                 status="published",
             )
             session.add(record)

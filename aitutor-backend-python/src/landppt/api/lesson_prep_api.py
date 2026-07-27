@@ -50,11 +50,11 @@ class GeneratePPTRequest(BaseModel):
 async def generate_lesson_prep(request: LessonPrepRequest):
     """AI备课生成接口。
 
-    返回 SSE (text/event-stream) 流，包含三个阶段的事件：
-    1. syllabus_chunk / syllabus_done — 教学大纲
-    2. slide / slides_done — PPT逐页结构
-    3. narration — 口语化讲解词
-    4. done — 全部完成（含prep_id）
+    返回 SSE (text/event-stream) 流，事件顺序：
+
+      1. outline               — 完整教学大纲 JSON
+      2. section × N            — 逐课时详情（index, title, content）
+      3. done                   — 全部完成（含 prepId）
 
     异常时返回:
       error — 包含 stage 和 message 字段
