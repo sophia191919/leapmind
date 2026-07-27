@@ -9,12 +9,15 @@ server:
 spring:
   application:
     name: leapmind-tts
+<<<<<<< Updated upstream
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       timeout: 2s
+=======
+>>>>>>> Stashed changes
   servlet:
     multipart:
       max-file-size: 50MB
@@ -57,7 +60,11 @@ asr:
 ai:
   api:
     key: sk-ead3ef8a1ef941bab04b2b530ed24a34
+<<<<<<< Updated upstream
   prompt: '你是一个聪明且体贴的老师，请简洁的回答以下这个问题，回答完后需要加入"还有其他问题欢迎继续问我呀。”'
+=======
+  prompt: '你是一个聪明且体贴的老师，请简洁的回答以下这个问题，回答完后需要加入"还有其他问题欢迎继续问我呀。"'
+>>>>>>> Stashed changes
 
 # 阿里云TTS配置
 tts:
@@ -71,9 +78,15 @@ tts:
 aliyun:
   access-key-id: LTAI5t9BuGenr8gDhn4uhcuN
   access-key-secret: jSBcno7mVpZTAgvSlgIpu5f75mok1c
+<<<<<<< Updated upstream
 #  用户登录名称 leapmind-test1@1808062431290363.onaliyun.com
 #  AccessKey ID LTAI5tKGcC3cuDmpMJgAVPji
 #  AccessKey Secret 1KUTUz13LT221pcJWL8sXviTZZ0hGd
+=======
+  #  用户登录名称 leapmind-test1@1808062431290363.onaliyun.com
+  #  AccessKey ID LTAI5tKGcC3cuDmpMJgAVPji
+  #  AccessKey Secret 1KUTUz13LT221pcJWL8sXviTZZ0hGd
+>>>>>>> Stashed changes
   sms:
     accessKeyId: LTAI5tKGcC3cuDmpMJgAVPji
     accessKeySecret: 1KUTUz13LT221pcJWL8sXviTZZ0hGd
@@ -83,6 +96,7 @@ aliyun:
       templateCode: SMS_154950909
       limitTime: 2
 
+<<<<<<< Updated upstream
 
 
 
@@ -118,6 +132,24 @@ text-polishing:
   validation:
     max-text-length: 500
     min-text-length: 5
+=======
+# 上下文压缩与降级、缓存配置（独立根节点，不再属于aliyun）
+context:
+  compress:
+    # 服务降级（兜底）配置
+    fallback:
+      # 是否启用降级机制
+      enabled: true
+      # 发生错误时，是否使用原始文本作为降级结果
+      use-original-on-error: true
+    # 编码设置
+    encoding: UTF-8
+    cache:
+      type: caffeine
+      cache-names: segments
+      caffeine:
+        spec: maximumSize=500,expireAfterAccess=30m
+>>>>>>> Stashed changes
 
 # 百度云语音识别配置
 baidu:
@@ -165,9 +197,12 @@ segmented-speech:
     enable-seek: true
     enable-pause-resume: true
     progress-update-interval: 1s
+<<<<<<< Updated upstream
 
 # Flyway 数据库迁移配置
 
+=======
+>>>>>>> Stashed changes
 # MyBatis配置
 mybatis:
   mapper-locations: classpath:mapper/*.xml
@@ -217,6 +252,7 @@ knife4j:
     language: zh_cn
     enable-swagger-models: true
     enable-document-manage: true
+<<<<<<< Updated upstream
 
 # MinIO文件存储配置
 minio:
@@ -240,3 +276,5 @@ virtual-teacher:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:leapmind-tts}
+=======
+>>>>>>> Stashed changes

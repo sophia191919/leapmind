@@ -16,10 +16,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @MapperScan("com.treepeople.leapmindtts.mapper")
 public class LeapMindTtsApplication {
 
-	public static void main(String[] args) {
-		SpringApplication.run(LeapMindTtsApplication.class, args);
-	}
+    public static void main(String[] args) {
+        SpringApplication.run(LeapMindTtsApplication.class, args);
+    }
 
 
 
-} 
+}
