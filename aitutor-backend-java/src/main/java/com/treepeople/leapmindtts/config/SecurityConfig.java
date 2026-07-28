@@ -24,6 +24,7 @@ public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final CorsConfig corsConfig;
+    private final com.treepeople.leapmindtts.service.profile.security.M6SecurityErrorHandler m6SecurityErrorHandler;
 
     /**
      * 密码编码器Bean
@@ -64,7 +65,7 @@ public class SecurityConfig {
                         // 允许访问 API 文档
                         .requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/doc.html", "/webjars/**").permitAll()
                         // 允许访问静态资源
-                        .requestMatchers("/static/**", "/*.html", "/*.js", "/*.css", "/admin/**", "/css/**", "/js/**", "/image/**").permitAll()
+                        .requestMatchers("/static/**", "/docs/**", "/*.html", "/*.js", "/*.css", "/admin/**", "/css/**", "/js/**", "/image/**").permitAll()
                         // 允许访问短信测试接口
                         .requestMatchers("/api/test/**").permitAll()
                         .requestMatchers("/api/admin/**").permitAll()
@@ -80,6 +81,11 @@ public class SecurityConfig {
                         // 其他请求需要认证
                         .anyRequest().authenticated()
                 )
+                .exceptionHandling(exceptions -> exceptions
+                        .defaultAuthenticationEntryPointFor(m6SecurityErrorHandler,
+                                new org.springframework.security.web.util.matcher.AntPathRequestMatcher("/api/user-profile/**"))
+                        .defaultAccessDeniedHandlerFor(m6SecurityErrorHandler,
+                                new org.springframework.security.web.util.matcher.AntPathRequestMatcher("/api/user-profile/**")))
                 // 添加JWT认证过滤器
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
