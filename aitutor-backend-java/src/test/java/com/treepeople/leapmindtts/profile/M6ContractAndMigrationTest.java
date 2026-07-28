@@ -1,22 +1,24 @@
 package com.treepeople.leapmindtts.profile;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.config.M6EventJsonCodec;
 import com.treepeople.leapmindtts.controller.user.M6ContextController;
 import com.treepeople.leapmindtts.exception.M6ApiException;
 import com.treepeople.leapmindtts.service.profile.UserEventService;
 import com.treepeople.leapmindtts.service.profile.UserProfileQueryService;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Map;
-import java.util.regex.Pattern;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.yaml.snakeyaml.Yaml;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class M6ContractAndMigrationTest {
     @Test void batchHardLimitIsRejectedBeforeService() throws Exception {
@@ -32,7 +34,7 @@ class M6ContractAndMigrationTest {
 
     @Test void migrationsDocumentedContractAndOpenApiStayFrozen() throws Exception {
         String v3 = read("src/main/resources/db/migration/V4__create_m6_user_events.sql");
-        String v4 = read("src/main/resources/db/migration/V5__create_m6_user_profiles.sql");
+        String v4 = read("src/main/resources/db/migration/V9__create_m6_user_profiles.sql");
         String v5 = read("src/main/resources/db/migration/V6__create_m6_user_knowledge_mastery.sql");
         assertAll(() -> assertTrue(v3.contains("PRIMARY KEY") && v3.contains("uk_user_events_event_id") && v3.contains("payload_hash_version")),
                 () -> assertTrue(v4.contains("uk_user_profiles_user_id") && v4.contains("chk_user_profiles_ready_or_stale") && v4.contains("JSON_TYPE(profile_data_json) = 'OBJECT'") && v4.contains("TRIM(algorithm_version)<>''") && v4.contains("DECIMAL(4,3)")
