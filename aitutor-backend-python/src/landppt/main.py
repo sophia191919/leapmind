@@ -16,11 +16,13 @@ from .api.database_api import router as database_router
 from .api.global_master_template_api import router as template_api_router
 from .api.config_api import router as config_router
 from .api.image_api import router as image_router
+from .m6.router import router as m6_router
 
 from .web import router as web_router
 from .auth import auth_router, create_auth_middleware
 from .database.database import init_db
 from .database.create_default_template import ensure_default_templates_exist_first_time
+from .m6.db import init_tables as m6_init_tables
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +57,8 @@ async def startup_event():
         logger.info("Initializing database...")
         await init_db()
         logger.info("Database initialized successfully")
+        m6_init_tables()
+        logger.info("M6 tables initialized successfully")
 
         # Only import templates if database file didn't exist before (first time setup)
         if not db_exists:
@@ -101,6 +105,7 @@ app.include_router(landppt_router, prefix="/api", tags=["LandPPT API"])
 app.include_router(template_api_router, tags=["Global Master Templates"])
 app.include_router(database_router, tags=["Database Management"])
 app.include_router(web_router, prefix="", tags=["Web Interface"])
+app.include_router(m6_router, prefix="", tags=["M6 复习与画像"])
 
 # Mount static files
 import os
