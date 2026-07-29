@@ -39,7 +39,7 @@ public class PptxExportServiceImpl implements PptxExportService {
     private static final int SLIDE_W = 960;
     private static final int SLIDE_H = 540;
 
-    @Override
+
     public String export(Long prepId) {
         log.info("导出PPT, prepId={}", prepId);
         try {
@@ -52,14 +52,12 @@ public class PptxExportServiceImpl implements PptxExportService {
         }
     }
 
-    @Override
     public String exportFromTeachingContent(TeachingContent content) {
         String json = content.getPptStructure();
         if (json == null || json.isEmpty()) throw new IllegalArgumentException("PPT结构数据为空");
         return exportFromJson(json, content.getTemplateId(), content.getTitle());
     }
 
-    @Override
     public String exportFromJson(String json, Long templateId, String fileName) {
         try {
             PptStructureDTO structure = objectMapper.readValue(json, PptStructureDTO.class);
@@ -70,7 +68,6 @@ public class PptxExportServiceImpl implements PptxExportService {
         }
     }
 
-    @Override
     public String exportFromStructure(PptStructureDTO structure, Long templateId, String fileName) {
         try {
             byte[] pptxBytes = generatePptxBytes(structure, templateId);
@@ -85,7 +82,6 @@ public class PptxExportServiceImpl implements PptxExportService {
         }
     }
 
-    @Override
     public byte[] generatePptxBytes(PptStructureDTO structure, Long templateId) {
         try (XMLSlideShow ppt = new XMLSlideShow();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
