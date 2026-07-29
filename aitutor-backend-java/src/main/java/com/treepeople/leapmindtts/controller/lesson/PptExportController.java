@@ -36,26 +36,6 @@ public class PptExportController {
     @Value("${minio.bucket-name:leapmind}")
     private String bucketName;
 
-    @PostMapping("/export/{prepId}")
-    public ResponseEntity<ApiResponse<Map<String, String>>> exportPpt(@PathVariable Long prepId) {
-        log.info("导出 PPT 请求，备课 ID: {}", prepId);
-
-        try {
-            String downloadUrl = pptxExportService.export(prepId);
-
-            Map<String, String> data = new HashMap<>();
-            data.put("downloadUrl", downloadUrl);
-            data.put("message", "PPT 导出成功");
-
-            return ResponseEntity.ok(ApiResponse.success(data, "PPT 导出成功"));
-
-        } catch (Exception e) {
-            log.error("PPT 导出失败，备课 ID: {}", prepId, e);
-            return ResponseEntity.internalServerError()
-                    .body(ApiResponse.error(500, "PPT 导出失败: " + e.getMessage()));
-        }
-    }
-
     @PostMapping("/export-from-json")
     public ResponseEntity<ApiResponse<Map<String, String>>> exportFromJson(
             @RequestBody Map<String, Object> request) {
