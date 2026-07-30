@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Optional
 
@@ -695,10 +696,81 @@ class LessonPrepService:
                         ppt_structure_json=json.dumps(
                             all_slides, ensure_ascii=False
                         ),
-                        updated_at=time.time(),
+                        updated_at=datetime.utcnow(),
                     )
                 )
                 await session.commit()
 
         # 6. 返回 (pptId, slides)，pptId 复用 prepId
         return prep_id, all_slides
+
+    # ════════════════════════════════════════════════════════════
+    # [internal] Non-streaming full pipeline (for Java internal API)
+    # ════════════════════════════════════════════════════════════
+
+    async def generate_and_return(self, ctx: PrepContext) -> dict:
+        """三段管线执行后直接返回完整结果 dict（不经过 SSE）。
+
+        Java 内部调用时使用此方法，通过 internal_ai.py 暴露。
+
+        Returns:
+            {
+                "prep_id": int,
+                "total_pages": int,
+                "total_duration_seconds": int,
+                "syllabus": {...},
+                "slides": [...],
+                "narrations": [...]
+            }
+            出错时返回 {"error": "错误信息"}
+        """
+        try:
+            # Stage 1: Syllabus (stream non-SSE)
+            messages = build_stage1_messages(
+                subject=ctx.subject,
+                grade=ctx.grade,
+                knowledge_point_ids=ctx.knowledge_point_ids,
+                teaching_goals=ctx.teaching_goals,
+                total_hours=ctx.total_hours,
+                style=ctx.style,
+                weak_point_ids=ctx.weak_point_ids,
+                user_profile_summary=ctx.user_profile_summary,
+            )
+            full_content = ""
+            async for chunk in self.provider.stream_chat_completion(messages):
+                full_content += chunk
+
+            syllabus = JSONExtractor.extract_dict(full_content)
+            if not syllabus.get("sections"):
+                return {"error": "生成的大纲中没有课时(sections)数据"}
+            ctx.syllabus = syllabus
+
+            # Validate
+            vr = await self.pipeline.validate("syllabus", syllabus)
+            if vr.fixes_applied:
+                ctx.syllabus = self.pipeline.get_fixed_data("syllabus", syllabus)
+
+            prep_id = 0
+            # Stage 2: Slides
+            all_slides: list[dict] = []
+            for section in ctx.syllabus.get("sections", []):
+                slides_batch = await self._generate_single_slide(section, ctx)
+                for slide in slides_batch:
+                    slide.setdefault("page_num", len(all_slides) + 1)
+                    all_slides.append(slide)
+            ctx.slides = all_slides
+
+            # Save to database
+            if ctx.syllabus:
+                prep_id = await self._save_to_db(ctx)
+
+            return {
+                "prep_id": prep_id,
+                "total_pages": len(all_slides),
+                "syllabus": ctx.syllabus,
+                "slides": all_slides,
+            }
+
+        except Exception as e:
+            logger.exception("generate_and_return failed")
+            return {"error": str(e)}
