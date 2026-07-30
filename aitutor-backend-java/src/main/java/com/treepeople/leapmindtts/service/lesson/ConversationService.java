@@ -17,6 +17,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
@@ -75,8 +77,10 @@ public class ConversationService {
 
     public void deleteSession(String sessionId) {
         cleanup(sessionId);
-        sessions.remove(sessionId);
-        log.info("Deleted session: {}", sessionId);
+        stringRedisTemplate.delete(REDIS_KEY_PREFIX + sessionId);
+        sessionMapper.logicDeleteBySessionId(sessionId);
+        messageMapper.logicDeleteBySessionId(sessionId);
+        log.info("Deleted session and its messages: {}", sessionId);
     }
 
     /**
@@ -115,6 +119,7 @@ public class ConversationService {
 
         StringBuilder fullAnswer = new StringBuilder();
         AtomicInteger index = new AtomicInteger(0);
+        AtomicBoolean messageSaved = new AtomicBoolean(false);
 
         return Flux.create(fluxSink -> {
             // 1. 先发 thinking 事件（带上 sessionId，打断用）
@@ -136,6 +141,7 @@ public class ConversationService {
                                 callId, sessionId,
                                 chunk.getInputTokens() != null ? chunk.getInputTokens() : 0,
                                 chunk.getOutputTokens() != null ? chunk.getOutputTokens() : 0)));
+                        messageSaved.set(true);
                         fluxSink.complete();
                         return;
                     }
@@ -147,6 +153,7 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnCancel() {
+                    if (messageSaved.get()) return;
                     log.info("AI stream cancelled for session: {}", sessionId);
                     String answer = fullAnswer.toString();
                     if (!answer.isEmpty()) {
@@ -159,6 +166,7 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnError(Throwable t) {
+                    if (messageSaved.get()) return;
                     log.error("AI stream error for session {}: {}", sessionId, t.getMessage());
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"error\",\"message\":\"%s\"}", escapeJson(t.getMessage()))));
@@ -167,6 +175,7 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnComplete() {
+                    if (messageSaved.get()) return;
                     log.warn("AI stream completed without last marker for session: {}", sessionId);
                     String answer = fullAnswer.toString();
                     if (!answer.isEmpty()) {
@@ -216,6 +225,122 @@ public class ConversationService {
         if (sub != null && !sub.isDisposed()) {
             sub.dispose();
         }
+    }
+
+    private String redisKey(String sessionId) {
+        return REDIS_KEY_PREFIX + sessionId;
+    }
+
+    private void saveSessionToRedis(ConversationSession session) {
+        try {
+            Map<String, Object> toStore = new LinkedHashMap<>();
+            toStore.put("sessionId", session.getSessionId());
+            toStore.put("userId", session.getUserId());
+            toStore.put("sceneType", session.getSceneType() != null ? session.getSceneType().name() : null);
+            toStore.put("context", session.getContext());
+            toStore.put("createdAt", session.getCreatedAt());
+            toStore.put("updatedAt", session.getUpdatedAt());
+
+            List<Map<String, String>> messages = session.getMessages();
+            if (messages.size() > properties.getMessageLimit()) {
+                messages = messages.subList(messages.size() - properties.getMessageLimit(), messages.size());
+            }
+            toStore.put("messages", messages);
+
+            String json = objectMapper.writeValueAsString(toStore);
+            String key = redisKey(session.getSessionId());
+            stringRedisTemplate.opsForValue().set(key, json,
+                    properties.getTimeout().toSeconds(), TimeUnit.SECONDS);
+            log.info("Saved session to Redis: key={}, TTL={}s", key, properties.getTimeout().toSeconds());
+        } catch (Exception e) {
+            log.error("Failed to save session to Redis: key={}, error={}", redisKey(session.getSessionId()), e.getMessage(), e);
+        }
+    }
+
+    private ConversationSession loadSessionFromRedis(String sessionId) {
+        String json = stringRedisTemplate.opsForValue().get(redisKey(sessionId));
+        if (json == null) {
+            return null;
+        }
+        try {
+            Map<String, Object> map = objectMapper.readValue(json, LinkedHashMap.class);
+            ConversationSession session = new ConversationSession();
+            session.setSessionId((String) map.get("sessionId"));
+            session.setUserId(map.get("userId") != null ? ((Number) map.get("userId")).longValue() : null);
+            String sceneTypeStr = (String) map.get("sceneType");
+            if (sceneTypeStr != null) {
+                session.setSceneType(SceneType.valueOf(sceneTypeStr));
+            }
+            session.setContext((Map<String, Object>) map.get("context"));
+            session.setCreatedAt(map.get("createdAt") != null ? ((Number) map.get("createdAt")).longValue() : 0);
+            session.setUpdatedAt(map.get("updatedAt") != null ? ((Number) map.get("updatedAt")).longValue() : 0);
+            List<Map<String, String>> messages = (List<Map<String, String>>) map.get("messages");
+            if (messages != null) {
+                session.setMessages(new ArrayList<>(messages));
+            }
+            return session;
+        } catch (Exception e) {
+            log.error("Failed to deserialize session from Redis: {}", sessionId, e);
+            stringRedisTemplate.delete(redisKey(sessionId));
+            return null;
+        }
+    }
+
+    private void extendRedisTtl(String sessionId) {
+        stringRedisTemplate.expire(redisKey(sessionId), properties.getTimeout().toSeconds(), TimeUnit.SECONDS);
+    }
+
+    private void saveSessionToDb(ConversationSession session) {
+        ConversationSessionEntity entity = new ConversationSessionEntity();
+        entity.setSessionId(session.getSessionId());
+        entity.setUserId(session.getUserId());
+        entity.setSceneType(session.getSceneType() != null ? session.getSceneType().name() : null);
+        try {
+            entity.setContextJson(objectMapper.writeValueAsString(session.getContext()));
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to serialize context for session: {}", session.getSessionId());
+        }
+        entity.setMessageCount(session.getMessages() != null ? session.getMessages().size() : 0);
+        sessionMapper.insert(entity);
+    }
+
+    private void saveMessageToDb(String sessionId, String role, String content, int inputTokens, int outputTokens, String callId) {
+        ConversationMessageEntity entity = new ConversationMessageEntity();
+        entity.setSessionId(sessionId);
+        entity.setRole(role);
+        entity.setContent(content);
+        entity.setInputTokens(inputTokens);
+        entity.setOutputTokens(outputTokens);
+        entity.setCallId(callId);
+        messageMapper.insert(entity);
+    }
+
+    private List<Map<String, String>> loadMessagesFromDb(String sessionId) {
+        List<ConversationMessageEntity> entities = messageMapper.selectBySessionId(sessionId);
+        return entities.stream()
+                .map(e -> Map.of("role", e.getRole(), "content", e.getContent()))
+                .collect(Collectors.toList());
+    }
+
+    private ConversationSession toDto(ConversationSessionEntity entity) {
+        ConversationSession dto = new ConversationSession();
+        dto.setSessionId(entity.getSessionId());
+        dto.setUserId(entity.getUserId());
+        if (entity.getSceneType() != null) {
+            dto.setSceneType(SceneType.valueOf(entity.getSceneType()));
+        }
+        if (entity.getContextJson() != null) {
+            try {
+                dto.setContext(objectMapper.readValue(entity.getContextJson(), LinkedHashMap.class));
+            } catch (JsonProcessingException e) {
+                log.warn("Failed to parse context JSON for session: {}", entity.getSessionId());
+            }
+        }
+        dto.setCreatedAt(entity.getCreatedAt() != null
+                ? entity.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() : 0);
+        dto.setUpdatedAt(entity.getUpdatedAt() != null
+                ? entity.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() : 0);
+        return dto;
     }
 
     private static ServerSentEvent<?> sseEvent(String eventName, String data) {
