@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.awt.*;
 import java.io.*;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 import java.time.format.DateTimeFormatter;
 
@@ -89,11 +90,33 @@ public class PptxExportServiceImpl implements PptxExportService {
             PptStructureDTO.TemplateConfig cfg = resolveConfig(structure);
             ppt.setPageSize(new Dimension(SLIDE_W, SLIDE_H));
 
+            // ——— 兼容 Python generate-ppt 返回的 {pptId, slides} 顶层格式 ———
+            // 如果没传 title/description，从 type=cover 的 slide 里提取
+            List<PptStructureDTO.SlideDTO> slides = structure.getSlides();
+            if (slides != null && !slides.isEmpty()) {
+                PptStructureDTO.SlideDTO cover = slides.stream()
+                        .filter(s -> "cover".equalsIgnoreCase(s.getType()))
+                        .findFirst()
+                        .orElse(null);
+                if (cover != null) {
+                    if ((structure.getTitle() == null || structure.getTitle().isBlank())
+                            && cover.getTitle() != null) {
+                        structure.setTitle(cover.getTitle());
+                    }
+                    if ((structure.getDescription() == null || structure.getDescription().isBlank())
+                            && cover.getBulletPoints() != null && !cover.getBulletPoints().isEmpty()) {
+                        structure.setDescription(String.join(" · ", cover.getBulletPoints()));
+                    }
+                }
+            }
+
             buildTitleSlide(ppt, structure, cfg);
 
-            if (structure.getSlides() != null) {
-                for (int i = 0; i < structure.getSlides().size(); i++) {
-                    buildContentSlide(ppt, structure.getSlides().get(i), cfg);
+            if (slides != null) {
+                for (PptStructureDTO.SlideDTO s : slides) {
+                    // cover 页已经作为 buildTitleSlide 的标题/副标题来源，跳过避免重复画封面
+                    if ("cover".equalsIgnoreCase(s.getType())) continue;
+                    buildContentSlide(ppt, s, cfg);
                 }
             }
 
@@ -137,9 +160,9 @@ public class PptxExportServiceImpl implements PptxExportService {
         PptStructureDTO.TemplateConfig cfg = structure.getTemplateConfig();
         if (cfg == null) {
             cfg = PptStructureDTO.TemplateConfig.builder()
-                    .primaryColor("#1E88E5")
-                    .secondaryColor("#2C3E50")
-                    .backgroundColor("#FFFFFF")
+                    .primaryColor("#546E7A")        // 封面/结束页：深灰蓝色（白字清晰）
+                    .secondaryColor("#263238")      // 内容页标题：炭灰色（在浅灰背景上清楚）
+                    .backgroundColor("#ECEFF1")     // 中间内容页：浅灰背景（护眼不刺眼）
                     .titleFont("微软雅黑")
                     .contentFont("微软雅黑")
                     .titleFontSize(36)
@@ -147,7 +170,7 @@ public class PptxExportServiceImpl implements PptxExportService {
                     .build();
         }
         if (cfg.getSecondaryColor() == null || cfg.getSecondaryColor().isEmpty()) {
-            cfg.setSecondaryColor("#2C3E50");
+            cfg.setSecondaryColor("#263238");
         }
         return cfg;
     }
@@ -169,25 +192,66 @@ public class PptxExportServiceImpl implements PptxExportService {
         XSLFSlide slide = ppt.createSlide();
         setBg(slide, cfg.getBackgroundColor());
 
+        String type = slideDto.getType() == null ? "content" : slideDto.getType().toLowerCase();
+
+        // ——— 标题：根据 type 加不同图标前缀 ———
         if (slideDto.getTitle() != null && !slideDto.getTitle().isEmpty()) {
+            String prefix = switch (type) {
+                case "summary"     -> "📌 ";
+                case "homework"    -> "📝 ";
+                case "interactive" -> "❓ ";
+                default            -> "";
+            };
             XSLFTextShape title = slide.createTextBox();
             title.setAnchor(new Rectangle(50, 30, SLIDE_W - 100, 60));
-            setText(title, slideDto.getTitle(), cfg.getTitleFontSize(), parseColor(cfg.getSecondaryColor()), cfg.getTitleFont(), true);
+            setText(title, prefix + slideDto.getTitle(), cfg.getTitleFontSize(),
+                    parseColor(cfg.getSecondaryColor()), cfg.getTitleFont(), true);
         }
 
-        XSLFTextShape content = slide.createTextBox();
-        content.setAnchor(new Rectangle(50, 120, SLIDE_W - 100, SLIDE_H - 180));
-
+        // ——— 正文：要点列表 或 纯正文 ———
         StringBuilder sb = new StringBuilder();
-        if (slideDto.getBulletPoints() != null) {
+        if (slideDto.getBulletPoints() != null && !slideDto.getBulletPoints().isEmpty()) {
             for (int i = 0; i < slideDto.getBulletPoints().size(); i++) {
                 if (i > 0) sb.append("\n");
                 sb.append("• ").append(slideDto.getBulletPoints().get(i));
             }
-        } else if (slideDto.getContent() != null) {
+        } else if (slideDto.getContent() != null && !slideDto.getContent().isEmpty()) {
             sb.append(slideDto.getContent());
         }
 
+        // ——— 公式：有就追加一行，用粗体稍大号字显示 ———
+        if (slideDto.getFormula() != null && !slideDto.getFormula().isEmpty()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("✏️ 公式：").append(slideDto.getFormula());
+        }
+
+        // ——— 互动题：type=interactive 且 interaction 不为 null 时追加 ———
+        PptStructureDTO.InteractionDTO inter = slideDto.getInteraction();
+        if ("interactive".equals(type) && inter != null) {
+            if (inter.getQuestion() != null && !inter.getQuestion().isEmpty()) {
+                if (sb.length() > 0) sb.append("\n\n");
+                sb.append("【提问】").append(inter.getQuestion());
+            }
+            if (inter.getOptions() != null && !inter.getOptions().isEmpty()) {
+                sb.append("\n");
+                for (String opt : inter.getOptions()) {
+                    sb.append("\n  ○ ").append(opt);
+                }
+            }
+            if (inter.getAnswer() != null && !inter.getAnswer().isEmpty()) {
+                sb.append("\n\n✅ 参考答案：").append(inter.getAnswer());
+            }
+        }
+
+        // ——— 高亮关键词：最后一行橙色显示 ———
+        if (slideDto.getHighlightPoints() != null && !slideDto.getHighlightPoints().isEmpty()) {
+            if (sb.length() > 0) sb.append("\n\n");
+            sb.append("✨关键词：").append(String.join("、", slideDto.getHighlightPoints()));
+        }
+
+        XSLFTextShape content = slide.createTextBox();
+        content.setAnchor(new Rectangle(50, 120, SLIDE_W - 100, SLIDE_H - 180));
+        // 关键词用橙色单独写（这里简单实现：统一用正文字色写，后续可按段落拆）
         setText(content, sb.toString(), cfg.getContentFontSize(), Color.BLACK, cfg.getContentFont(), false);
     }
 
