@@ -60,7 +60,7 @@ tts:
   app:
     key: 1NKi3NqL8jyXC8PK
   voice: zhixiaoxia # 发音人配置
-
+  api-url: http://localhost:8080/api/virtual-teacher/tts
 # 阿里云AccessKey配置
 aliyun:
   access-key-id: LTAI5t9BuGenr8gDhn4uhcuN
@@ -219,6 +219,3 @@ minio:
   secret-key: minioadmin
   bucket-name: leapmind
 
-# TTS语音接口地址
-tts:
-  api-url: http://localhost:8080/api/virtual-teacher/tts
