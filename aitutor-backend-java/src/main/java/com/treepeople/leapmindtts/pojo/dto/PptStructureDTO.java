@@ -1,5 +1,7 @@
 package com.treepeople.leapmindtts.pojo.dto;
 
+import com.fasterxml.jackson.databind.PropertyNamingStrategies.SnakeCaseStrategy;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -11,6 +13,7 @@ import java.util.List;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonNaming(SnakeCaseStrategy.class)
 public class PptStructureDTO {
 
     /** 备课ID（Python的generate-ppt返回的pptId，值等于prepId） */
@@ -32,6 +35,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonNaming(SnakeCaseStrategy.class)
     public static class SlideDTO {
 
         /** 页码，从1开始 */
@@ -87,6 +91,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonNaming(SnakeCaseStrategy.class)
     public static class InteractionDTO {
         /** 互动类型：choice_question / think_question / practice */
         private String type;
