@@ -61,6 +61,7 @@ ai:
 
 # 阿里云TTS配置
 tts:
+  api-url: http://localhost:8080/api/virtual-teacher/tts
   api:
     key: # 这个将通过TokenService动态获取
   app:
@@ -231,14 +232,11 @@ minio:
   access-key: minioadmin
   secret-key: minioadmin
   bucket-name: leapmind
-# M8 TTS语音接口地址
-tts:
-  api-url: http://localhost:8080/api/virtual-teacher/tts
 # M8 虚拟 AI 教师
 virtual-teacher:
-    cache-ttl: 24h
-    synthesis-timeout: 125s
-    storage:
+  cache-ttl: 24h
+  synthesis-timeout: 125s
+  storage:
     # local 用于无 MinIO 的本地开发；部署时设为 minio
     type: ${VIRTUAL_TEACHER_STORAGE_TYPE:local}
     local-dir: ${VIRTUAL_TEACHER_LOCAL_DIR:${java.io.tmpdir}/leapmind-tts}
@@ -247,8 +245,6 @@ virtual-teacher:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:leapmind-tts}
-=======
-
 # Python AI 服务配置（复习计算、事件处理）
 python-service:
   base-url: http://localhost:8000

@@ -2,6 +2,7 @@ package com.treepeople.leapmindtts.pojo.result;
 
  import lombok.Data;
  import lombok.AllArgsConstructor;
+ import lombok.Builder;
  import lombok.NoArgsConstructor;
 
  /**
@@ -10,6 +11,7 @@ package com.treepeople.leapmindtts.pojo.result;
   * @param <T> 响应数据类型
   */
  @Data
+ @Builder
  @AllArgsConstructor
  @NoArgsConstructor
  public class ApiResponse<T> {

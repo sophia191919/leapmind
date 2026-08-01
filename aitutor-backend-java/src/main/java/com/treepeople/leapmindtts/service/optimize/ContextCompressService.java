@@ -11,7 +11,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import java.time.Duration;
 
-@Service
+@Service("optimizeContextCompressService")
 @Slf4j
 public class ContextCompressService {
 

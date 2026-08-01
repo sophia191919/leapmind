@@ -6,9 +6,8 @@
  import org.springframework.stereotype.Component;
  
  @Data
- @Component
+ @Component("optimizePythonApiProperties")
  @ConfigurationProperties(prefix = "python.api")
  public class PythonApiProperties {
      private String compressContextUri;
  }
- 

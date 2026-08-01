@@ -6,10 +6,9 @@
  import org.springframework.stereotype.Component;
  
  @Data
- @Component
+ @Component("optimizeContextCompressProperties")
  @ConfigurationProperties(prefix = "context.compress")
  public class ContextCompressProperties {
      private int tokenThreshold = 4000; // Default threshold
      private int maxCompressedTokens = 1000; // Default max
  }
- 
