@@ -211,3 +211,14 @@ knife4j:
     language: zh_cn
     enable-swagger-models: true
     enable-document-manage: true
+
+# MinIO对象存储配置（PPT、音频文件上传使用）
+minio:
+  endpoint: http://127.0.0.1:9000
+  access-key: minioadmin
+  secret-key: minioadmin
+  bucket-name: leapmind
+
+# TTS语音接口地址
+tts:
+  api-url: http://localhost:8080/api/virtual-teacher/tts
