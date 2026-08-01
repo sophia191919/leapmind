@@ -10,7 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
-@Service
+@Service("optimizeRequestMergeService")
 public class RequestMergeService {
 
     // 存储合并请求的池子
@@ -56,4 +56,3 @@ public class RequestMergeService {
          public static RequestMergeResult merged(CompletableFuture<String> f) { return new RequestMergeResult(false, f); }
      }
  }
- 

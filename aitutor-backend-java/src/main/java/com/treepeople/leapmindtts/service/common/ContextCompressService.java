@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
@@ -40,7 +41,7 @@ public class ContextCompressService {
                 .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000);
 
         this.webClient = webClientBuilder
-                .clientConnector(new reactor.netty.http.client.ReactorClientHttpConnector(httpClient))
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .baseUrl(properties.getBaseUrl())
                 .build();
     }

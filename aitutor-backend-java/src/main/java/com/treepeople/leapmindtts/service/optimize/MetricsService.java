@@ -11,7 +11,7 @@
  import java.util.function.Supplier;
  import java.util.function.UnaryOperator;
  
- @Service
+ @Service("optimizeMetricsService")
  @RequiredArgsConstructor
  public class MetricsService {
  

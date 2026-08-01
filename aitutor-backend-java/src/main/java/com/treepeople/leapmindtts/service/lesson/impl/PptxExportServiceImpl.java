@@ -19,7 +19,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.UUID;
 
 @Slf4j
-@Service
+@Service("lessonPptxExportServiceImpl")
 @RequiredArgsConstructor
 public class PptxExportServiceImpl {
     private final MinioClient minioClient;
@@ -63,7 +63,7 @@ public class PptxExportServiceImpl {
                     XSLFTextParagraph p = titleBox.addNewTextParagraph();
                     XSLFTextRun run = p.addNewTextRun();
                     run.setText(page.get("title").asText());
-                    run.setFontSize(26);
+                    run.setFontSize(26D);
                     run.setBold(true);
                 }
                 // 渲染正文
@@ -73,7 +73,7 @@ public class PptxExportServiceImpl {
                     XSLFTextParagraph p = contentBox.addNewTextParagraph();
                     XSLFTextRun run = p.addNewTextRun();
                     run.setText(page.get("content").asText());
-                    run.setFontSize(16);
+                    run.setFontSize(16D);
                 }
                 // 渲染旁白提示
                 if (page.has("narrationText") && !page.get("narrationText").asText().isBlank()) {
@@ -82,7 +82,7 @@ public class PptxExportServiceImpl {
                     XSLFTextParagraph p = voiceBox.addNewTextParagraph();
                     XSLFTextRun run = p.addNewTextRun();
                     run.setText("配音旁白：" + page.get("narrationText").asText());
-                    run.setFontSize(12);
+                    run.setFontSize(12D);
                     run.setItalic(true);
                 }
             }

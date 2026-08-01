@@ -9,7 +9,7 @@
  import java.time.Duration;
  
  @Slf4j
- @Service
+ @Service("optimizeRedisCacheService")
  @RequiredArgsConstructor
  public class RedisCacheService {
      private final RedisTemplate<String, Object> redisTemplate;
@@ -41,4 +41,3 @@
          redisTemplate.opsForValue().set(cacheKey, NULL_PLACEHOLDER, NULL_TTL);
      }
  }
- 
