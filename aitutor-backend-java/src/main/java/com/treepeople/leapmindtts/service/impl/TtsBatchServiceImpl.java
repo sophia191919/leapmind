@@ -1,4 +1,4 @@
-ackage com.treepeople.leapmindtts.service.impl;
+package com.treepeople.leapmindtts.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.mapper.TeachingContentMapper;
