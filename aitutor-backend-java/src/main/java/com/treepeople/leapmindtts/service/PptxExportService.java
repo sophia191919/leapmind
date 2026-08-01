@@ -3,6 +3,7 @@ package com.treepeople.leapmindtts.service;
 /**
  * PPT导出服务接口
  */
+
 public interface PptxExportService {
 
     /**
@@ -11,5 +12,13 @@ public interface PptxExportService {
      * @param prepId 备课ID
      * @return 下载URL
      */
-   String exportPptxByPrepId(Long prepId);
+    String export(Long prepId);
+
+    /**
+     * 获取临时文件路径
+     *
+     * @param prepId 备课ID
+     * @return 临时文件路径
+     */
+    String getTempFilePath(Long prepId);
 }
