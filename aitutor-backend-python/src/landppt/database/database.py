@@ -68,8 +68,12 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
         logger.info("SQLite 模式：表已自动创建")
     else:
-        # MySQL 模式：表由 Java Flyway 管理，Python 不负责建表
-        logger.info("MySQL 模式：跳过自动建表，表由 Java Flyway 迁移管理")
+        # MySQL 模式：Python 模型表带 py_ 前缀，与 Java Flyway 表共存。
+        # create_all 只建不存在的表（py_*），不影响 Java 已有的表。
+        from .models import Base
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("MySQL 模式：py_ 前缀表已自动创建")
 
     # Initialize default admin user
     from ..auth.auth_service import init_default_admin

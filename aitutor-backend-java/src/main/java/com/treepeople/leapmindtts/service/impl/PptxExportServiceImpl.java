@@ -12,9 +12,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xslf.usermodel.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
 
 import java.awt.*;
 import java.io.*;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -28,6 +30,7 @@ public class PptxExportServiceImpl implements PptxExportService {
     private final TeachingContentMapper teachingContentMapper;
     private final MinioClient minioClient;
     private final ObjectMapper objectMapper;
+    private final WebClient webClient;
 
     @Value("${minio.bucket-name:leapmind}")
     private String bucketName;
@@ -93,8 +96,9 @@ public class PptxExportServiceImpl implements PptxExportService {
             // ——— 兼容 Python generate-ppt 返回的 {pptId, slides} 顶层格式 ———
             // 如果没传 title/description，从 type=cover 的 slide 里提取
             List<PptStructureDTO.SlideDTO> slides = structure.getSlides();
+            PptStructureDTO.SlideDTO cover = null;
             if (slides != null && !slides.isEmpty()) {
-                PptStructureDTO.SlideDTO cover = slides.stream()
+                cover = slides.stream()
                         .filter(s -> "cover".equalsIgnoreCase(s.getType()))
                         .findFirst()
                         .orElse(null);
@@ -110,7 +114,8 @@ public class PptxExportServiceImpl implements PptxExportService {
                 }
             }
 
-            buildTitleSlide(ppt, structure, cfg);
+            buildTitleSlide(ppt, structure, cfg,
+                    cover != null ? cover.getImageUrl() : null);
 
             if (slides != null) {
                 for (PptStructureDTO.SlideDTO s : slides) {
@@ -175,17 +180,24 @@ public class PptxExportServiceImpl implements PptxExportService {
         return cfg;
     }
 
-    private void buildTitleSlide(XMLSlideShow ppt, PptStructureDTO s, PptStructureDTO.TemplateConfig cfg) {
+    private void buildTitleSlide(XMLSlideShow ppt, PptStructureDTO s,
+                                 PptStructureDTO.TemplateConfig cfg, String coverImageUrl) {
         XSLFSlide slide = ppt.createSlide();
         setBg(slide, cfg.getPrimaryColor());
 
+        boolean hasImage = coverImageUrl != null && !coverImageUrl.isBlank();
+
         XSLFTextShape title = slide.createTextBox();
-        title.setAnchor(new Rectangle(50, 150, SLIDE_W - 100, 100));
+        title.setAnchor(hasImage ? new Rectangle(50, 150, 480, 100) : new Rectangle(50, 150, SLIDE_W - 100, 100));
         setText(title, s.getTitle() != null ? s.getTitle() : "演示文稿", 44, Color.WHITE, cfg.getTitleFont(), true);
 
         XSLFTextShape subtitle = slide.createTextBox();
-        subtitle.setAnchor(new Rectangle(50, 280, SLIDE_W - 100, 50));
+        subtitle.setAnchor(hasImage ? new Rectangle(50, 280, 480, 50) : new Rectangle(50, 280, SLIDE_W - 100, 50));
         setText(subtitle, s.getDescription() != null ? s.getDescription() : "", 20, new Color(149, 165, 166), cfg.getContentFont(), false);
+
+        if (hasImage) {
+            addSlideImage(ppt, slide, coverImageUrl, new Rectangle(560, 140, 350, 260));
+        }
     }
 
     private void buildContentSlide(XMLSlideShow ppt, PptStructureDTO.SlideDTO slideDto, PptStructureDTO.TemplateConfig cfg) {
@@ -249,10 +261,18 @@ public class PptxExportServiceImpl implements PptxExportService {
             sb.append("✨关键词：").append(String.join("、", slideDto.getHighlightPoints()));
         }
 
+        boolean hasImage = slideDto.getImageUrl() != null && !slideDto.getImageUrl().isBlank();
+
         XSLFTextShape content = slide.createTextBox();
-        content.setAnchor(new Rectangle(50, 120, SLIDE_W - 100, SLIDE_H - 180));
+        content.setAnchor(hasImage
+                ? new Rectangle(50, 120, 470, SLIDE_H - 180)   // 有图：右侧留出 560 起 350 宽区域
+                : new Rectangle(50, 120, SLIDE_W - 100, SLIDE_H - 180));
         // 关键词用橙色单独写（这里简单实现：统一用正文字色写，后续可按段落拆）
         setText(content, sb.toString(), cfg.getContentFontSize(), Color.BLACK, cfg.getContentFont(), false);
+
+        if (hasImage) {
+            addSlideImage(ppt, slide, slideDto.getImageUrl(), new Rectangle(560, 120, 350, 340));
+        }
     }
 
     private void buildEndSlide(XMLSlideShow ppt, PptStructureDTO s, PptStructureDTO.TemplateConfig cfg) {
@@ -283,6 +303,48 @@ public class PptxExportServiceImpl implements PptxExportService {
             slide.getBackground().setFillColor(parseColor(colorHex));
         } catch (Exception e) {
             log.warn("设置背景色失败: {}", colorHex);
+        }
+    }
+
+    /** 下载配图字节；失败或超时返回 null（不抛异常） */
+    private byte[] downloadImage(String url) {
+        try {
+            return webClient.get()
+                    .uri(url)
+                    .retrieve()
+                    .bodyToMono(byte[].class)
+                    .timeout(Duration.ofSeconds(15))
+                    .block();
+        } catch (Exception e) {
+            log.warn("PPT配图下载失败, url={}, err={}", url, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 魔术字节识别图片类型（文件名可能不准确，必须嗅探字节） */
+    private org.apache.poi.sl.usermodel.PictureData.PictureType detectPictureType(byte[] data) {
+        org.apache.poi.sl.usermodel.PictureData.PictureType png =
+                org.apache.poi.sl.usermodel.PictureData.PictureType.PNG;
+        org.apache.poi.sl.usermodel.PictureData.PictureType jpeg =
+                org.apache.poi.sl.usermodel.PictureData.PictureType.JPEG;
+        if (data.length >= 8 && (data[0] & 0xFF) == 0x89 && data[1] == 0x50
+                && data[2] == 0x4E && data[3] == 0x47) return png;
+        if (data.length >= 3 && (data[0] & 0xFF) == 0xFF && (data[1] & 0xFF) == 0xD8
+                && (data[2] & 0xFF) == 0xFF) return jpeg;
+        return png;  // 兜底
+    }
+
+    /** 下载并插入图片；任何失败都跳过，仅记日志 */
+    private void addSlideImage(XMLSlideShow ppt, XSLFSlide slide, String imageUrl, Rectangle anchor) {
+        if (imageUrl == null || imageUrl.isBlank()) return;
+        byte[] bytes = downloadImage(imageUrl);
+        if (bytes == null || bytes.length == 0) return;
+        try {
+            XSLFPictureData picData = ppt.addPicture(bytes, detectPictureType(bytes));
+            XSLFPictureShape pic = slide.createPicture(picData);
+            pic.setAnchor(anchor);
+        } catch (Exception e) {
+            log.warn("PPT配图插入失败: {}", e.getMessage());
         }
     }
 

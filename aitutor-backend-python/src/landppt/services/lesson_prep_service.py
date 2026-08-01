@@ -686,6 +686,12 @@ class LessonPrepService:
 
         ppt_ctx.slides = all_slides
 
+        # 4.5 为每页生成配图（失败降级，不影响 PPT 结构）
+        try:
+            await self._enrich_slides_with_images(all_slides, topic=record.title)
+        except Exception as e:
+            logger.error(f"PPT 配图步骤异常（继续导出纯文字版）: {e}")
+
         # 5. 更新数据库中的 PPT 结构
         if all_slides:
             async with AsyncSessionLocal() as session:
@@ -703,6 +709,94 @@ class LessonPrepService:
 
         # 6. 返回 (pptId, slides)，pptId 复用 prepId
         return prep_id, all_slides
+
+    # ════════════════════════════════════════════════════════════
+    # [PPT配图] 为幻灯片 JSON 生成配图 URL（image_url 字段）
+    # ════════════════════════════════════════════════════════════
+
+    async def _select_image_provider(self):
+        """按 config 默认值选择生成 provider；未注册则 fallback pollinations；都没有返回 None。"""
+        from .image.providers.base import provider_registry
+
+        registered = {p.provider.value for p in provider_registry.get_generation_providers()}
+        if not registered:
+            return None
+
+        from .image.models import ImageProvider
+        try:
+            from .config_service import get_config_service
+            cfg = get_config_service().get_all_config()
+            default = str(cfg.get("default_ai_image_provider", "dalle") or "dalle").lower()
+        except Exception:
+            default = "dalle"
+
+        if default in registered:
+            return ImageProvider(default)
+        if ImageProvider.POLLINATIONS.value in registered:
+            return ImageProvider.POLLINATIONS
+        return None
+
+    async def _generate_slide_image_url(
+        self, slide: dict, topic: str, page_num: int, total_pages: int, provider
+    ) -> Optional[str]:
+        """为单页生成配图，成功返回 image_url，失败返回 None（绝不抛异常）。"""
+        from .image.adapters.ppt_prompt_adapter import PPTSlideContext
+        from .image.image_service import get_image_service
+        from .url_service import build_image_url
+
+        suggestion = (slide.get("image_suggestion") or "").strip()
+        bullets = [b for b in (slide.get("bullet_points") or []) if b]
+        # image_suggestion 优先，附带最多 3 条要点补充语境
+        if suggestion:
+            content = suggestion + ("；" + "；".join(bullets[:3]) if bullets else "")
+        else:
+            content = "；".join(bullets) or slide.get("title", "")
+
+        context = PPTSlideContext(
+            title=slide.get("title", ""),
+            content=content,
+            scenario="education",
+            topic=topic,
+            page_number=page_num,
+            total_pages=total_pages,
+            slide_type=slide.get("type", "content"),
+            language="zh",
+        )
+        image_service = get_image_service()
+        result = await image_service.generate_ppt_slide_image(context, provider)
+        if result.success and result.image_info:
+            return build_image_url(result.image_info.image_id)
+        logger.warning("第 %s 页配图失败: %s", slide.get("page_num", "?"), result.message)
+        return None
+
+    async def _enrich_slides_with_images(self, slides: list[dict], topic: str = "") -> list[dict]:
+        """并发为每页生成配图并写 slide["image_url"]；单页失败降级，不阻塞整体。"""
+        import asyncio
+
+        provider = await self._select_image_provider()
+        if provider is None:
+            logger.warning("没有可用的图片生成 provider，跳过 PPT 配图")
+            return slides
+
+        total = len(slides)
+        semaphore = asyncio.Semaphore(3)  # 限并发 3
+
+        async def _one(slide: dict) -> None:
+            if not isinstance(slide, dict):
+                return
+            try:
+                async with semaphore:
+                    url = await self._generate_slide_image_url(
+                        slide, topic, slide.get("page_num", 0), total, provider
+                    )
+                if url:
+                    slide["image_url"] = url
+                    logger.info("第 %s 页配图成功: %s", slide.get("page_num"), url)
+            except Exception as e:
+                logger.warning("第 %s 页配图异常: %s", slide.get("page_num", "?"), e)
+
+        await asyncio.gather(*(_one(s) for s in slides))
+        return slides
 
     # ════════════════════════════════════════════════════════════
     # [internal] Non-streaming full pipeline (for Java internal API)
