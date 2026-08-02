@@ -44,7 +44,7 @@ public class PptxExportServiceImpl implements PptxExportService {
     public String export(Long prepId) {
         log.info("导出PPT, prepId={}", prepId);
         try {
-            TeachingContent content = teachingContentMapper.selectById(prepId);
+            TeachingContent content = teachingContentMapper.selectByPrepId(prepId);
             if (content == null) throw new IllegalArgumentException("备课内容不存在: " + prepId);
             return exportFromTeachingContent(content);
         } catch (Exception e) {
