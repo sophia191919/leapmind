@@ -1,50 +1,91 @@
 package com.treepeople.leapmindtts.service.lesson;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.treepeople.leapmindtts.config.ConversationProperties;
+import com.treepeople.leapmindtts.mapper.ConversationMessageMapper;
+import com.treepeople.leapmindtts.mapper.ConversationSessionMapper;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest;
-import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.InputType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
+import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
+import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
+import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.Disposable;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 
-import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class ConversationService {
 
+    private static final String REDIS_KEY_PREFIX = "user:session:";
+
     private final AIModelService aiModelService;
     private final AiTeacherBaiduAsrService aiTeacherBaiduAsrService;
     private final WebClient webClient;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final ConversationSessionMapper sessionMapper;
+    private final ConversationMessageMapper messageMapper;
+    private final ConversationProperties properties;
+    private final ObjectMapper objectMapper;
 
-    private final ConcurrentHashMap<String, ConversationSession> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BaseSubscriber<AIModelService.AiChunk>> activeSubscribers = new ConcurrentHashMap<>();
 
-    public ConversationService(AIModelService aiModelService, AiTeacherBaiduAsrService aiTeacherBaiduAsrService, WebClient.Builder webClientBuilder) {
+    public ConversationService(AIModelService aiModelService,
+                               AiTeacherBaiduAsrService aiTeacherBaiduAsrService,
+                               WebClient.Builder webClientBuilder,
+                               StringRedisTemplate stringRedisTemplate,
+                               ConversationSessionMapper sessionMapper,
+                               ConversationMessageMapper messageMapper,
+                               ConversationProperties properties,
+                               ObjectMapper objectMapper) {
         this.aiModelService = aiModelService;
         this.aiTeacherBaiduAsrService = aiTeacherBaiduAsrService;
         this.webClient = webClientBuilder.build();
+        this.stringRedisTemplate = stringRedisTemplate;
+        this.sessionMapper = sessionMapper;
+        this.messageMapper = messageMapper;
+        this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     @PostConstruct
     public void init() {
-        log.info("ConversationService initialized");
+        log.info("ConversationService initialized (timeout={}, messageLimit={})",
+                properties.getTimeout(), properties.getMessageLimit());
     }
 
     public String getOrCreateSessionId(ConversationRequest req) {
-        if (req.getSessionId() != null && sessions.containsKey(req.getSessionId())) {
-            return req.getSessionId();
+        if (req.getSessionId() != null) {
+            ConversationSession existing = loadSessionFromRedis(req.getSessionId());
+            if (existing != null) {
+                extendRedisTtl(req.getSessionId());
+                return req.getSessionId();
+            }
+            ConversationSessionEntity entity = sessionMapper.selectBySessionId(req.getSessionId());
+            if (entity != null) {
+                ConversationSession restored = toDto(entity);
+                restored.setMessages(loadMessagesFromDb(req.getSessionId()));
+                saveSessionToRedis(restored);
+                return req.getSessionId();
+            }
         }
+
         String sid = UUID.randomUUID().toString();
         var session = new ConversationSession();
         session.setSessionId(sid);
@@ -53,30 +94,38 @@ public class ConversationService {
         session.setContext(req.getContext());
         session.setCreatedAt(Instant.now().toEpochMilli());
         session.setUpdatedAt(Instant.now().toEpochMilli());
-        sessions.put(sid, session);
-        log.info("Created new session: {}", sid);
+
+        saveSessionToRedis(session);
+        saveSessionToDb(session);
+        log.info("Created new session: {} for userId={}", sid, req.getUserId());
         return sid;
     }
 
     public ConversationSession getSession(String sessionId) {
-        return sessions.get(sessionId);
+        ConversationSession session = loadSessionFromRedis(sessionId);
+        if (session != null) {
+            return session;
+        }
+        ConversationSessionEntity entity = sessionMapper.selectBySessionId(sessionId);
+        if (entity == null) {
+            return null;
+        }
+        ConversationSession dto = toDto(entity);
+        dto.setMessages(loadMessagesFromDb(sessionId));
+        return dto;
     }
 
     public List<ConversationSession> listSessions(Long userId) {
-        var result = new ArrayList<ConversationSession>();
-        for (var s : sessions.values()) {
-            if (s.getUserId() != null && s.getUserId().equals(userId)) {
-                result.add(s);
-            }
-        }
-        result.sort((a, b) -> Long.compare(b.getUpdatedAt(), a.getUpdatedAt()));
-        return result;
+        List<ConversationSessionEntity> entities = sessionMapper.selectByUserId(userId);
+        return entities.stream().map(this::toDto).collect(Collectors.toList());
     }
 
     public void deleteSession(String sessionId) {
         cleanup(sessionId);
-        sessions.remove(sessionId);
-        log.info("Deleted session: {}", sessionId);
+        stringRedisTemplate.delete(REDIS_KEY_PREFIX + sessionId);
+        sessionMapper.logicDeleteBySessionId(sessionId);
+        messageMapper.logicDeleteBySessionId(sessionId);
+        log.info("Deleted session and its messages: {}", sessionId);
     }
 
     /**
@@ -85,7 +134,20 @@ public class ConversationService {
      */
     public Flux<ServerSentEvent<?>> streamResponse(ConversationRequest req) {
         String sessionId = getOrCreateSessionId(req);
-        var session = sessions.get(sessionId);
+        final ConversationSession session;
+        ConversationSession loaded = loadSessionFromRedis(sessionId);
+        if (loaded != null) {
+            session = loaded;
+        } else {
+            ConversationSessionEntity entity = sessionMapper.selectBySessionId(sessionId);
+            if (entity == null) {
+                return Flux.error(new IllegalStateException("Session not found: " + sessionId));
+            }
+            session = toDto(entity);
+            session.setMessages(loadMessagesFromDb(sessionId));
+            saveSessionToRedis(session);
+        }
+
         var callId = "call_" + UUID.randomUUID().toString().substring(0, 8);
 
         // 语音输入：下载音频 → ASR 转文字 → 替换 question
@@ -109,12 +171,15 @@ public class ConversationService {
         }
 
         if (req.getQuestion() != null && !req.getQuestion().isEmpty()) {
-            session.getMessages().add(Map.of("role", "user", "content", req.getQuestion()));
+            Map<String, String> userMsg = Map.of("role", "user", "content", req.getQuestion());
+            session.getMessages().add(userMsg);
+            saveMessageToDb(sessionId, "user", req.getQuestion(), 0, 0, callId);
         }
         session.setUpdatedAt(Instant.now().toEpochMilli());
 
         StringBuilder fullAnswer = new StringBuilder();
         AtomicInteger index = new AtomicInteger(0);
+        AtomicBoolean messageSaved = new AtomicBoolean(false);
 
         return Flux.create(fluxSink -> {
             // 1. 先发 thinking 事件（带上 sessionId，打断用）
@@ -131,11 +196,21 @@ public class ConversationService {
                         String answer = fullAnswer.toString();
                         session.getMessages().add(Map.of("role", "assistant", "content", answer));
 
+                        saveMessageToDb(sessionId, "assistant", answer,
+                                chunk.getInputTokens() != null ? chunk.getInputTokens() : 0,
+                                chunk.getOutputTokens() != null ? chunk.getOutputTokens() : 0,
+                                callId);
+
+                        int msgCount = messageMapper.selectBySessionId(sessionId).size();
+                        sessionMapper.updateMessageCount(sessionId, msgCount);
+                        saveSessionToRedis(session);
+
                         fluxSink.next(sseEvent("message",
                             String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":%d,\"output\":%d}}",
                                 callId, sessionId,
                                 chunk.getInputTokens() != null ? chunk.getInputTokens() : 0,
                                 chunk.getOutputTokens() != null ? chunk.getOutputTokens() : 0)));
+                        messageSaved.set(true);
                         fluxSink.complete();
                         return;
                     }
@@ -147,10 +222,15 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnCancel() {
+                    if (messageSaved.get()) return;
                     log.info("AI stream cancelled for session: {}", sessionId);
                     String answer = fullAnswer.toString();
                     if (!answer.isEmpty()) {
                         session.getMessages().add(Map.of("role", "assistant", "content", answer));
+                        saveMessageToDb(sessionId, "assistant", answer, 0, 0, callId);
+                        int msgCount = messageMapper.selectBySessionId(sessionId).size();
+                        sessionMapper.updateMessageCount(sessionId, msgCount);
+                        saveSessionToRedis(session);
                     }
                     fluxSink.next(sseEvent("interrupt",
                         "{\"type\":\"interrupted\",\"message\":\"用户已打断\"}"));
@@ -159,6 +239,7 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnError(Throwable t) {
+                    if (messageSaved.get()) return;
                     log.error("AI stream error for session {}: {}", sessionId, t.getMessage());
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"error\",\"message\":\"%s\"}", escapeJson(t.getMessage()))));
@@ -167,10 +248,15 @@ public class ConversationService {
 
                 @Override
                 protected void hookOnComplete() {
+                    if (messageSaved.get()) return;
                     log.warn("AI stream completed without last marker for session: {}", sessionId);
                     String answer = fullAnswer.toString();
                     if (!answer.isEmpty()) {
                         session.getMessages().add(Map.of("role", "assistant", "content", answer));
+                        saveMessageToDb(sessionId, "assistant", answer, 0, 0, callId);
+                        int msgCount = messageMapper.selectBySessionId(sessionId).size();
+                        sessionMapper.updateMessageCount(sessionId, msgCount);
+                        saveSessionToRedis(session);
                     }
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}",
@@ -179,9 +265,12 @@ public class ConversationService {
                 }
             };
 
-            List<Map<String, String>> history = session.getMessages();
-            if (history.size() > 20) {
-                history = history.subList(history.size() - 20, history.size());
+            List<Map<String, String>> allHistory = session.getMessages();
+            final List<Map<String, String>> history;
+            if (allHistory.size() > properties.getMessageLimit()) {
+                history = allHistory.subList(allHistory.size() - properties.getMessageLimit(), allHistory.size());
+            } else {
+                history = allHistory;
             }
             aiModelService.streamAIResponse(history, req.getInputType(), req.getAttachmentUrls())
                 .subscribe(subscriber);
@@ -216,6 +305,122 @@ public class ConversationService {
         if (sub != null && !sub.isDisposed()) {
             sub.dispose();
         }
+    }
+
+    private String redisKey(String sessionId) {
+        return REDIS_KEY_PREFIX + sessionId;
+    }
+
+    private void saveSessionToRedis(ConversationSession session) {
+        try {
+            Map<String, Object> toStore = new LinkedHashMap<>();
+            toStore.put("sessionId", session.getSessionId());
+            toStore.put("userId", session.getUserId());
+            toStore.put("sceneType", session.getSceneType() != null ? session.getSceneType().name() : null);
+            toStore.put("context", session.getContext());
+            toStore.put("createdAt", session.getCreatedAt());
+            toStore.put("updatedAt", session.getUpdatedAt());
+
+            List<Map<String, String>> messages = session.getMessages();
+            if (messages.size() > properties.getMessageLimit()) {
+                messages = messages.subList(messages.size() - properties.getMessageLimit(), messages.size());
+            }
+            toStore.put("messages", messages);
+
+            String json = objectMapper.writeValueAsString(toStore);
+            String key = redisKey(session.getSessionId());
+            stringRedisTemplate.opsForValue().set(key, json,
+                    properties.getTimeout().toSeconds(), TimeUnit.SECONDS);
+            log.info("Saved session to Redis: key={}, TTL={}s", key, properties.getTimeout().toSeconds());
+        } catch (Exception e) {
+            log.error("Failed to save session to Redis: key={}, error={}", redisKey(session.getSessionId()), e.getMessage(), e);
+        }
+    }
+
+    private ConversationSession loadSessionFromRedis(String sessionId) {
+        String json = stringRedisTemplate.opsForValue().get(redisKey(sessionId));
+        if (json == null) {
+            return null;
+        }
+        try {
+            Map<String, Object> map = objectMapper.readValue(json, LinkedHashMap.class);
+            ConversationSession session = new ConversationSession();
+            session.setSessionId((String) map.get("sessionId"));
+            session.setUserId(map.get("userId") != null ? ((Number) map.get("userId")).longValue() : null);
+            String sceneTypeStr = (String) map.get("sceneType");
+            if (sceneTypeStr != null) {
+                session.setSceneType(SceneType.valueOf(sceneTypeStr));
+            }
+            session.setContext((Map<String, Object>) map.get("context"));
+            session.setCreatedAt(map.get("createdAt") != null ? ((Number) map.get("createdAt")).longValue() : 0);
+            session.setUpdatedAt(map.get("updatedAt") != null ? ((Number) map.get("updatedAt")).longValue() : 0);
+            List<Map<String, String>> messages = (List<Map<String, String>>) map.get("messages");
+            if (messages != null) {
+                session.setMessages(new ArrayList<>(messages));
+            }
+            return session;
+        } catch (Exception e) {
+            log.error("Failed to deserialize session from Redis: {}", sessionId, e);
+            stringRedisTemplate.delete(redisKey(sessionId));
+            return null;
+        }
+    }
+
+    private void extendRedisTtl(String sessionId) {
+        stringRedisTemplate.expire(redisKey(sessionId), properties.getTimeout().toSeconds(), TimeUnit.SECONDS);
+    }
+
+    private void saveSessionToDb(ConversationSession session) {
+        ConversationSessionEntity entity = new ConversationSessionEntity();
+        entity.setSessionId(session.getSessionId());
+        entity.setUserId(session.getUserId());
+        entity.setSceneType(session.getSceneType() != null ? session.getSceneType().name() : null);
+        try {
+            entity.setContextJson(objectMapper.writeValueAsString(session.getContext()));
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to serialize context for session: {}", session.getSessionId());
+        }
+        entity.setMessageCount(session.getMessages() != null ? session.getMessages().size() : 0);
+        sessionMapper.insert(entity);
+    }
+
+    private void saveMessageToDb(String sessionId, String role, String content, int inputTokens, int outputTokens, String callId) {
+        ConversationMessageEntity entity = new ConversationMessageEntity();
+        entity.setSessionId(sessionId);
+        entity.setRole(role);
+        entity.setContent(content);
+        entity.setInputTokens(inputTokens);
+        entity.setOutputTokens(outputTokens);
+        entity.setCallId(callId);
+        messageMapper.insert(entity);
+    }
+
+    private List<Map<String, String>> loadMessagesFromDb(String sessionId) {
+        List<ConversationMessageEntity> entities = messageMapper.selectBySessionId(sessionId);
+        return entities.stream()
+                .map(e -> Map.of("role", e.getRole(), "content", e.getContent()))
+                .collect(Collectors.toList());
+    }
+
+    private ConversationSession toDto(ConversationSessionEntity entity) {
+        ConversationSession dto = new ConversationSession();
+        dto.setSessionId(entity.getSessionId());
+        dto.setUserId(entity.getUserId());
+        if (entity.getSceneType() != null) {
+            dto.setSceneType(SceneType.valueOf(entity.getSceneType()));
+        }
+        if (entity.getContextJson() != null) {
+            try {
+                dto.setContext(objectMapper.readValue(entity.getContextJson(), LinkedHashMap.class));
+            } catch (JsonProcessingException e) {
+                log.warn("Failed to parse context JSON for session: {}", entity.getSessionId());
+            }
+        }
+        dto.setCreatedAt(entity.getCreatedAt() != null
+                ? entity.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() : 0);
+        dto.setUpdatedAt(entity.getUpdatedAt() != null
+                ? entity.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() : 0);
+        return dto;
     }
 
     private static ServerSentEvent<?> sseEvent(String eventName, String data) {
