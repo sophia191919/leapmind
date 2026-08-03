@@ -4,10 +4,13 @@ import com.treepeople.leapmindtts.pojo.dto.MarkReviewedRequest;
 import com.treepeople.leapmindtts.pojo.result.ApiResponse;
 import com.treepeople.leapmindtts.pojo.vo.ReviewReminderVO;
 import com.treepeople.leapmindtts.service.user.ReviewReminderService;
+import com.treepeople.leapmindtts.service.profile.security.ProfileActorResolver;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.DataAccessException;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -37,6 +40,7 @@ import java.util.List;
 public class UserProfileController {
 
     private final ReviewReminderService reviewReminderService;
+    private final ProfileActorResolver profileActorResolver;
 
     /**
      * 待复习提醒查询
@@ -50,12 +54,14 @@ public class UserProfileController {
      * @return HTTP 200 + 复习提醒列表；异常时返回 HTTP 400 + 错误消息
      */
     @GetMapping("/{userId}/review-reminders")
-    public ResponseEntity<ApiResponse<List<ReviewReminderVO>>> getReviewReminders(@PathVariable Long userId) {
+    public ResponseEntity<ApiResponse<List<ReviewReminderVO>>> getReviewReminders(@PathVariable Long userId, HttpServletRequest servletRequest) {
+        profileActorResolver.authorizeSelf(servletRequest, userId);
         log.info("查询用户 {} 的待复习提醒", userId);
 
         try {
             List<ReviewReminderVO> reminders = reviewReminderService.getReviewReminders(userId);
             return ResponseEntity.ok(ApiResponse.success(reminders, "查询待复习提醒成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("查询用户 {} 待复习提醒失败: {}", userId, e.getMessage());
             return ResponseEntity.badRequest()
@@ -84,12 +90,14 @@ public class UserProfileController {
     @PostMapping("/{userId}/mark-reviewed")
     public ResponseEntity<ApiResponse<ReviewReminderVO>> markReviewed(
             @PathVariable Long userId,
-            @RequestBody @Valid MarkReviewedRequest request) {
+            @RequestBody @Valid MarkReviewedRequest request, HttpServletRequest servletRequest) {
+        profileActorResolver.authorizeSelf(servletRequest, userId);
         log.info("用户 {} 标记复习提醒 {} 为已复习", userId, request.getReminderId());
 
         try {
             ReviewReminderVO result = reviewReminderService.markAsReviewed(userId, request);
             return ResponseEntity.ok(ApiResponse.success(result, "标记已复习成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("用户 {} 标记已复习失败: {}", userId, e.getMessage());
             return ResponseEntity.badRequest()
@@ -105,12 +113,14 @@ public class UserProfileController {
      * @return HTTP 200 + 复习记录完整列表
      */
     @GetMapping("/{userId}/review-history")
-    public ResponseEntity<ApiResponse<List<ReviewReminderVO>>> getReviewHistory(@PathVariable Long userId) {
+    public ResponseEntity<ApiResponse<List<ReviewReminderVO>>> getReviewHistory(@PathVariable Long userId, HttpServletRequest servletRequest) {
+        profileActorResolver.authorizeSelf(servletRequest, userId);
         log.info("查询用户 {} 的所有复习记录", userId);
 
         try {
             List<ReviewReminderVO> reminders = reviewReminderService.getAllReminders(userId);
             return ResponseEntity.ok(ApiResponse.success(reminders, "查询复习记录成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("查询用户 {} 复习记录失败: {}", e.getMessage());
             return ResponseEntity.badRequest()

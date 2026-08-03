@@ -3,9 +3,13 @@ package com.treepeople.leapmindtts.controller;
 import com.treepeople.leapmindtts.pojo.entity.EventCollection;
 import com.treepeople.leapmindtts.pojo.result.ApiResponse;
 import com.treepeople.leapmindtts.service.EventCollectionService;
+import com.treepeople.leapmindtts.service.profile.security.ProfileActorResolver;
+import com.treepeople.leapmindtts.exception.M6ApiException;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.DataAccessException;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -40,9 +44,11 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/events")
 @RequiredArgsConstructor
+@Deprecated(since = "2026-07", forRemoval = false)
 public class EventCollectionController {
 
     private final EventCollectionService eventCollectionService;
+    private final ProfileActorResolver profileActorResolver;
 
     /**
      * 采集单条事件
@@ -75,12 +81,14 @@ public class EventCollectionController {
      * @return HTTP 200 + 保存后的事件（含数据库生成的 ID）
      */
     @PostMapping("/collect")
-    public ResponseEntity<ApiResponse<EventCollection>> collectEvent(@RequestBody EventCollection event) {
+    public ResponseEntity<ApiResponse<EventCollection>> collectEvent(@RequestBody EventCollection event, HttpServletRequest servletRequest) {
+        requireUserActor(servletRequest, event == null ? null : event.getUserId());
         log.info("采集事件，模块: {}, 类型: {}", event.getModule(), event.getEventType());
 
         try {
             EventCollection saved = eventCollectionService.collectEvent(event);
             return ResponseEntity.ok(ApiResponse.success(saved, "事件采集成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("事件采集失败: {}", e.getMessage());
             return ResponseEntity.badRequest()
@@ -98,12 +106,19 @@ public class EventCollectionController {
      * @return HTTP 200 + 保存后的事件列表
      */
     @PostMapping("/collect/batch")
-    public ResponseEntity<ApiResponse<List<EventCollection>>> collectEvents(@RequestBody List<EventCollection> events) {
+    public ResponseEntity<ApiResponse<List<EventCollection>>> collectEvents(@RequestBody List<EventCollection> events, HttpServletRequest servletRequest) {
+        if (events == null || events.isEmpty() || events.size() > 100) throw new IllegalArgumentException("events batch size must be 1..100");
+        EventCollection first = events.get(0);
+        Long userId = first == null ? null : first.getUserId();
+        requireUserActor(servletRequest, userId);
+        if (events.stream().anyMatch(event -> event == null || !userId.equals(event.getUserId())))
+            throw new IllegalArgumentException("all batch events must belong to the authenticated user");
         log.info("批量采集事件，共 {} 条", events.size());
 
         try {
             List<EventCollection> saved = eventCollectionService.collectEvents(events);
             return ResponseEntity.ok(ApiResponse.success(saved, "批量事件采集成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("批量事件采集失败: {}", e.getMessage());
             return ResponseEntity.badRequest()
@@ -120,16 +135,7 @@ public class EventCollectionController {
      */
     @GetMapping("/unprocessed/{module}")
     public ResponseEntity<ApiResponse<List<EventCollection>>> getUnprocessedEvents(@PathVariable String module) {
-        log.info("查询模块 {} 未处理的事件", module);
-
-        try {
-            List<EventCollection> events = eventCollectionService.getUnprocessedEvents(module);
-            return ResponseEntity.ok(ApiResponse.success(events, "查询未处理事件成功"));
-        } catch (Exception e) {
-            log.error("查询模块 {} 未处理事件失败: {}", module, e.getMessage());
-            return ResponseEntity.badRequest()
-                    .body(ApiResponse.error(400, e.getMessage()));
-        }
+        throw legacyServiceIdentityMissing();
     }
 
     /**
@@ -140,12 +146,14 @@ public class EventCollectionController {
      * @return HTTP 200 + 用户事件列表
      */
     @GetMapping("/user/{userId}")
-    public ResponseEntity<ApiResponse<List<EventCollection>>> getUserEvents(@PathVariable Long userId) {
+    public ResponseEntity<ApiResponse<List<EventCollection>>> getUserEvents(@PathVariable Long userId, HttpServletRequest servletRequest) {
+        profileActorResolver.authorizeSelf(servletRequest, userId);
         log.info("查询用户 {} 的事件数据", userId);
 
         try {
             List<EventCollection> events = eventCollectionService.getUserEvents(userId);
             return ResponseEntity.ok(ApiResponse.success(events, "查询用户事件成功"));
+        } catch (DataAccessException e) { throw e;
         } catch (Exception e) {
             log.error("查询用户 {} 事件失败: {}", userId, e.getMessage());
             return ResponseEntity.badRequest()
@@ -162,15 +170,14 @@ public class EventCollectionController {
      */
     @PutMapping("/{eventId}/processed")
     public ResponseEntity<ApiResponse<String>> markAsProcessed(@PathVariable Long eventId) {
-        log.info("标记事件 {} 为已处理", eventId);
+        throw legacyServiceIdentityMissing();
+    }
 
-        try {
-            eventCollectionService.markAsProcessed(eventId);
-            return ResponseEntity.ok(ApiResponse.success("标记已处理成功"));
-        } catch (Exception e) {
-            log.error("标记事件 {} 已处理失败: {}", eventId, e.getMessage());
-            return ResponseEntity.badRequest()
-                    .body(ApiResponse.error(400, e.getMessage()));
-        }
+    private void requireUserActor(HttpServletRequest request, Long userId) {
+        if (userId == null || userId <= 0) throw new IllegalArgumentException("userId must be positive");
+        profileActorResolver.authorizeSelf(request, userId);
+    }
+    private M6ApiException legacyServiceIdentityMissing() {
+        return new M6ApiException(org.springframework.http.HttpStatus.FORBIDDEN, "PROFILE_ACCESS_DENIED", "Legacy service identity is not configured");
     }
 }
