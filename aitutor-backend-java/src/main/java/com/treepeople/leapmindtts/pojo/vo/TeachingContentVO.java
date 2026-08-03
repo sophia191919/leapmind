@@ -57,6 +57,11 @@ public class TeachingContentVO {
     private String pptDownloadUrl;
 
     /**
+     * 完整备课生成内容（含大纲、PPT、讲稿）
+     */
+    private String generatedContentJson;
+
+    /**
      * 创建时间
      */
     private LocalDateTime createdAt;

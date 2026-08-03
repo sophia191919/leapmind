@@ -1,5 +1,6 @@
 package com.treepeople.leapmindtts.pojo.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -32,6 +33,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class SlideDTO {
 
         /** 页码，从1开始 */
@@ -87,6 +89,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class InteractionDTO {
         /** 互动类型：choice_question / think_question / practice */
         private String type;

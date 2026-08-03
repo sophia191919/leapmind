@@ -77,7 +77,7 @@ public class PptGenerationServiceImpl {
         try {
             sseService.sendProgress(connectionId, 0, "STARTED", "开始处理备课 " + prepId);
 
-            TeachingContent content = mapper.selectById(prepId);
+            TeachingContent content = mapper.selectByPrepId(prepId);
             if (content == null) throw new IllegalArgumentException("备课不存在: " + prepId);
 
             String json = content.getPptStructure();
