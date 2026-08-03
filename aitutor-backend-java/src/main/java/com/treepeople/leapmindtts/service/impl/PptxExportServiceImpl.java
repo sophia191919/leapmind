@@ -40,13 +40,25 @@ public class PptxExportServiceImpl implements PptxExportService {
     private static final int SLIDE_W = 960;
     private static final int SLIDE_H = 540;
 
-
     public String export(Long prepId) {
         log.info("导出PPT, prepId={}", prepId);
         try {
             TeachingContent content = teachingContentMapper.selectByPrepId(prepId);
             if (content == null) throw new IllegalArgumentException("备课内容不存在: " + prepId);
-            return exportFromTeachingContent(content);
+            String url = exportFromTeachingContent(content);
+
+            // 将下载 URL 回写到 teaching_contents 已有的 ppt_download_url 列（不新增列、不新增表）
+            try {
+                content.setPptDownloadUrl(url);
+                teachingContentMapper.updateById(content);
+                log.info("已更新 teaching_contents.ppt_download_url, id={}, url={}", content.getId(), url);
+            } catch (Exception dbEx) {
+                log.warn("PPT URL 回写数据库失败（不影响用户下载）, prepId={}, err={}", prepId, dbEx.getMessage());
+            }
+
+            return url;
+        } catch (IllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
             log.error("PPT导出失败, prepId={}", prepId, e);
             throw new RuntimeException("PPT导出失败: " + e.getMessage(), e);
@@ -54,21 +66,28 @@ public class PptxExportServiceImpl implements PptxExportService {
     }
 
     public String exportFromTeachingContent(TeachingContent content) {
+        if (content == null) throw new IllegalArgumentException("TeachingContent 不能为 null");
         String json = content.getPptStructure();
-        if (json == null || json.isEmpty()) throw new IllegalArgumentException("PPT结构数据为空");
+        if (json == null || json.isEmpty()) throw new IllegalArgumentException("PPT结构数据为空（ppt_structure 列为空）");
         return exportFromJson(json, content.getTemplateId(), content.getTitle());
     }
 
     public String exportFromJson(String json, Long templateId, String fileName) {
         try {
-            PptStructureDTO structure = objectMapper.readValue(json, PptStructureDTO.class);
+            // 约定：入参 JSON 必须已是 Python 端 convert_keys_camel 处理后的格式：
+            //   顶层 {"pptId":N,"slides":[...]} 对象，所有键 camelCase（递归到嵌套层）
+            // Java 端不做任何 snake→camel 转换，仅在解析失败且 JSON 以 [ 开头时
+            // 进行"纯数组 → 对象"的内存包装兜底（不改 DB / 不改 Python）
+            PptStructureDTO structure = PptStructureDTO.parse(objectMapper, json);
             return exportFromStructure(structure, templateId, fileName);
+        } catch (IllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("解析PPT结构失败", e);
+            log.error("解析PPT结构失败（请确认入参已是Python端 convert_keys_camel 后的 camelCase + 顶层对象格式）", e);
             throw new RuntimeException("解析PPT结构失败: " + e.getMessage(), e);
         }
     }
-
+  
     public String exportFromStructure(PptStructureDTO structure, Long templateId, String fileName) {
         try {
             byte[] pptxBytes = generatePptxBytes(structure, templateId);
