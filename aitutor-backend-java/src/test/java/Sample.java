@@ -7,7 +7,7 @@ import com.aliyun.dysmsapi20170525.models.SendSmsResponse;
 import com.aliyun.teaopenapi.models.Config;
 import com.treepeople.leapmindtts.config.ALiYunSMSConfig;
 import com.treepeople.leapmindtts.pojo.entity.SMVCodeConfigModel;
-import com.treepeople.leapmindtts.service.SmsConfigService;
+import com.treepeople.leapmindtts.service.user.SmsConfigService;
 import com.treepeople.leapmindtts.util.AuthCodeUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.Test;
