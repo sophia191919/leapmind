@@ -1,8 +1,7 @@
 package com.treepeople.leapmindtts.pojo.dto;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies.SnakeCaseStrategy;
-import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -14,7 +13,7 @@ import java.util.List;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@JsonNaming(SnakeCaseStrategy.class)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class PptStructureDTO {
 
     /** 备课ID（Python的generate-ppt返回的pptId，值等于prepId） */
@@ -37,7 +36,6 @@ public class PptStructureDTO {
     @NoArgsConstructor
     @AllArgsConstructor
     @JsonIgnoreProperties(ignoreUnknown = true)
-    @JsonNaming(SnakeCaseStrategy.class)
     public static class SlideDTO {
 
         /** 页码，从1开始 */
@@ -94,7 +92,7 @@ public class PptStructureDTO {
     @NoArgsConstructor
     @AllArgsConstructor
     @JsonIgnoreProperties(ignoreUnknown = true)
-    @JsonNaming(SnakeCaseStrategy.class)
+   
     public static class InteractionDTO {
         /** 互动类型：choice_question / think_question / practice */
         private String type;
@@ -110,6 +108,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class TemplateConfig {
 
         private String primaryColor;
@@ -125,5 +124,53 @@ public class PptStructureDTO {
         private Integer titleFontSize;
 
         private Integer contentFontSize;
+    }
+
+    /**
+     * 统一解析入口（推荐 Service/Controller 都走这里）。
+     *
+     * <ol>
+     *   <li>第 1 次：按 <code>PptStructureDTO</code> 顶层对象解析（正常路径：
+     *       <code>{"pptId":N,"slides":[...]}</code>）。</li>
+     *   <li>若第 1 次失败 <b>且</b> JSON 顶层 Trim 后以 <code>'['</code> 开头，
+     *       视为「纯 slides 数组」的历史脏数据（Python 直接把数组落库），
+     *       <b>纯内存包装</b>为 <code>{"slides":[...]}</code> 再解析 1 次，
+     *       不回写 DB、不改 Python、不做命名转换。</li>
+     * </ol>
+     *
+     * @param om   Jackson ObjectMapper（建议由 Spring 注入复用）
+     * @param json 原 JSON 字符串
+     * @return 解析后的 PptStructureDTO，不会为 null
+     * @throws RuntimeException 两种格式都解析失败时抛出（由上层统一转 HTTP 500）
+     */
+    public static PptStructureDTO parse(ObjectMapper om, String json) {
+        if (om == null) throw new IllegalArgumentException("ObjectMapper 不能为 null");
+        if (json == null || json.trim().isEmpty()) {
+            throw new IllegalArgumentException("PPT 结构 JSON 不能为空");
+        }
+        RuntimeException firstErr = null;
+        // —— 1. 正常路径：顶层 {pptId, slides} 对象 ——
+        try {
+            PptStructureDTO dto = om.readValue(json, PptStructureDTO.class);
+            if (dto != null) return dto;
+        } catch (Exception ex) {
+            firstErr = new RuntimeException("按 PptStructureDTO 顶层对象解析失败: " + ex.getMessage(), ex);
+        }
+        // —— 2. 兜底路径：DB 存的是纯 slides 数组，内存包装成 {"slides":[...]} 再试 ——
+        String trimmed = json.trim();
+        if (trimmed.charAt(0) == '[') {
+            String wrapped = "{\"slides\":" + trimmed + "}";
+            try {
+                PptStructureDTO dto = om.readValue(wrapped, PptStructureDTO.class);
+                if (dto != null) return dto;
+            } catch (Exception ex2) {
+                RuntimeException wrap = new RuntimeException(
+                        "按 PptStructureDTO 解析失败，且纯数组→对象内存包装后再次解析失败: " + ex2.getMessage(), ex2);
+                if (firstErr != null) wrap.addSuppressed(firstErr);
+                throw wrap;
+            }
+        }
+        if (firstErr != null) throw firstErr;
+        throw new RuntimeException("解析 PPT 结构 JSON 失败（未知格式）");
     }
 }
