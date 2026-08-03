@@ -81,7 +81,7 @@ public class TeachingContentController {
             @RequestParam Long userId) {
         log.info("查询备课详情，ID: {}，用户ID: {}", prepId, userId);
         try {
-            TeachingContent content = teachingContentService.getById(prepId);
+            TeachingContent content = teachingContentService.getByPrepId(prepId);
             if (content == null) {
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.error(400, "备课内容不存在"));
@@ -118,7 +118,7 @@ public class TeachingContentController {
         log.info("更新备课，ID: {}，用户ID: {}", prepId, userId);
         try {
             // 查询备课是否存在
-            TeachingContent content = teachingContentService.getById(prepId);
+            TeachingContent content = teachingContentService.getByPrepId(prepId);
             if (content == null) {
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.error(400, "备课内容不存在"));
@@ -201,7 +201,7 @@ public class TeachingContentController {
         log.info("删除备课，ID: {}，用户ID: {}", prepId, userId);
         try {
             // 查询备课是否存在
-            TeachingContent content = teachingContentService.getById(prepId);
+            TeachingContent content = teachingContentService.getByPrepId(prepId);
             if (content == null) {
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.error(400, "备课内容不存在"));
@@ -219,7 +219,7 @@ public class TeachingContentController {
                         .body(ApiResponse.error(400, "仅草稿状态的备课可以删除"));
             }
 
-            teachingContentService.removeById(prepId);
+            teachingContentService.removeByPrepId(prepId);
             log.info("备课删除成功，ID: {}", prepId);
             return ResponseEntity.ok(ApiResponse.success(null, "删除备课成功"));
         } catch (Exception e) {
@@ -265,6 +265,7 @@ public class TeachingContentController {
                 .pptStructure(content.getPptStructure())
                 .templateId(content.getTemplateId())
                 .pptDownloadUrl(content.getPptDownloadUrl())
+                .generatedContentJson(content.getGeneratedContentJson())
                 .createdAt(content.getCreatedAt())
                 .updatedAt(content.getUpdatedAt())
                 .build();

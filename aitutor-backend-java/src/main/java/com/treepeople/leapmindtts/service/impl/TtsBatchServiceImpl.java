@@ -298,7 +298,7 @@ public class TtsBatchServiceImpl {
 
     private void updateDatabase(Long prepId, PptStructureDTO structure) {
         try {
-            TeachingContent c = contentMapper.selectById(prepId);
+            TeachingContent c = contentMapper.selectByPrepId(prepId);
             if (c == null) return;
             c.setPptStructure(objectMapper.writeValueAsString(structure));
             contentMapper.updateById(c);

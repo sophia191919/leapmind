@@ -1,5 +1,6 @@
 package com.treepeople.leapmindtts.pojo.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies.SnakeCaseStrategy;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import lombok.AllArgsConstructor;
@@ -35,6 +36,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     @JsonNaming(SnakeCaseStrategy.class)
     public static class SlideDTO {
 
@@ -91,6 +93,7 @@ public class PptStructureDTO {
     @Builder
     @NoArgsConstructor
     @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     @JsonNaming(SnakeCaseStrategy.class)
     public static class InteractionDTO {
         /** 互动类型：choice_question / think_question / practice */

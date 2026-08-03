@@ -233,7 +233,7 @@ public class PptTemplateController {
             }
 
             // 2. 查询备课内容，获取 pptStructure
-            TeachingContent teachingContent = teachingContentService.getById(prepId);
+            TeachingContent teachingContent = teachingContentService.getByPrepId(prepId);
             if (teachingContent == null) {
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.error(400, "备课内容不存在"));
