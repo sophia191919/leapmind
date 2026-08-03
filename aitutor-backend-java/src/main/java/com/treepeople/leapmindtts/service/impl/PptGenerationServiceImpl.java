@@ -80,16 +80,30 @@ public class PptGenerationServiceImpl {
             TeachingContent content = mapper.selectByPrepId(prepId);
             if (content == null) throw new IllegalArgumentException("备课不存在: " + prepId);
 
+            // 约定：teaching_contents.ppt_structure 列必须已是 Python 端 convert_keys_camel 处理好的格式：
+            //   顶层 {"pptId":N,"slides":[...]} 对象，所有键 camelCase（递归到嵌套层）
+            // Java 端不做任何 snake→camel 转换；仅当解析失败且 JSON 以 [ 开头时
+            // 进行"纯数组 → 对象"内存包装兜底（不改 DB / 不改 Python）
             String json = content.getPptStructure();
             if (json == null || json.isEmpty()) throw new IllegalArgumentException("PPT结构为空");
 
-            PptStructureDTO structure = om.readValue(json, PptStructureDTO.class);
+            PptStructureDTO structure = PptStructureDTO.parse(om, json);
             int totalSlides = structure.getSlides() != null ? structure.getSlides().size() : 0;
             result.setTotalSlides(totalSlides);
 
             sseService.sendProgress(connectionId, 10, "PROCESSING", "正在生成PPTX...");
-            String pptUrl = pptxService.export(prepId);
+            String pptUrl = pptxService.exportFromStructure(structure, content.getTemplateId(), content.getTitle());
             result.setPptDownloadUrl(pptUrl);
+
+            // 回写下载 URL 到已有列 ppt_download_url（不新增列、不改库）
+            try {
+                content.setPptDownloadUrl(pptUrl);
+                mapper.updateById(content);
+                log.info("Pipeline 已更新 teaching_contents.ppt_download_url, prepId={}, url={}", prepId, pptUrl);
+            } catch (Exception dbEx) {
+                log.warn("Pipeline 回写 ppt_download_url 失败（不影响最终结果）, prepId={}, err={}", prepId, dbEx.getMessage());
+            }
+
             sseService.sendProgress(connectionId, 40, "PROCESSING", "PPTX生成成功");
 
             List<TtsBatchServiceImpl.NarrationTask> tasks = new ArrayList<>();
