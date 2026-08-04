@@ -252,11 +252,10 @@ public class PptTemplateController {
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.error(400, "模板配置缺少 colorScheme"));
             }
-
-            JsonNode pages = pptStructure.get("pages");
-            if (pages != null && pages.isArray()) {
-                for (JsonNode page : pages) {
-                    JsonNode style = page.get("style");
+            JsonNode slidesArr = pptStructure.get("slides");
+            if (slidesArr != null && slidesArr.isArray()) {
+                for (JsonNode slide : slidesArr) {
+                    JsonNode style = slide.get("style");
                     if (style != null && style.isObject()) {
                         ((com.fasterxml.jackson.databind.node.ObjectNode) style).put("primaryColor", colorScheme.get("primary").asText());
                         ((com.fasterxml.jackson.databind.node.ObjectNode) style).put("secondaryColor", colorScheme.get("secondary").asText());
