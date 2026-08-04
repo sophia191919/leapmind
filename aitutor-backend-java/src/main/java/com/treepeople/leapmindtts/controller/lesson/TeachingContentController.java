@@ -1,12 +1,12 @@
 package com.treepeople.leapmindtts.controller.lesson;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.pojo.dto.TeachingContentUpdateDTO;
 import com.treepeople.leapmindtts.pojo.entity.TeachingContent;
 import com.treepeople.leapmindtts.pojo.result.ApiResponse;
 import com.treepeople.leapmindtts.pojo.vo.TeachingContentVO;
 import com.treepeople.leapmindtts.service.PptxExportService;
-import com.treepeople.leapmindtts.service.PythonApiClient;
 import com.treepeople.leapmindtts.service.TeachingContentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -16,13 +16,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 备课内容控制器
+ * 备课内容管理控制器 — 对应 M5 文档 4.1.4 备课内容管理服务
  */
 @Slf4j
 @RestController
@@ -33,10 +34,8 @@ public class TeachingContentController {
 
     private final TeachingContentService teachingContentService;
     private final PptxExportService pptxExportService;
-    // [跨端联桥] 调用 Python AI 服务生成备课内容
-    private final PythonApiClient pythonApiClient;
     private final ObjectMapper om;
-    
+
     /** 草稿 */
     private static final String STATUS_DRAFT = "draft";
     /** 已发布 */
@@ -46,25 +45,32 @@ public class TeachingContentController {
 
     /**
      * 获取备课列表
+     * <p>M5→M4 接口契约：返回 {total, items: [...]}，items 含 type/subject/grade/slideCount 等字段。</p>
      *
      * @param userId 用户ID
      * @param status 状态筛选（可选）
+     * @param type   类型筛选（可选，目前固定 ppt）
      * @return 备课列表
      */
     @GetMapping
-    @Operation(summary = "获取备课列表", description = "查询当前用户所有备课，按创建时间倒序，可选按状态筛选")
-    public ResponseEntity<ApiResponse<List<TeachingContentVO>>> listContents(
+    @Operation(summary = "获取备课列表", description = "查询当前用户所有备课，按创建时间倒序，可选按状态和类型筛选")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> listContents(
             @Parameter(description = "用户ID", required = true)
             @RequestParam Long userId,
             @Parameter(description = "状态筛选（draft/published/archived）")
-            @RequestParam(required = false) String status) {
-        log.info("查询备课列表，用户ID: {}，状态: {}", userId, status);
+            @RequestParam(required = false) String status,
+            @Parameter(description = "类型筛选（ppt）")
+            @RequestParam(required = false) String type) {
+        log.info("查询备课列表，用户ID: {}，状态: {}，类型: {}", userId, status, type);
         try {
             List<TeachingContent> list = teachingContentService.listByUserId(userId, status);
             List<TeachingContentVO> voList = list.stream()
                     .map(this::convertToVO)
                     .collect(Collectors.toList());
-            return ResponseEntity.ok(ApiResponse.success(voList, "查询备课列表成功"));
+            Map<String, Object> data = new HashMap<>();
+            data.put("total", voList.size());
+            data.put("items", voList);
+            return ResponseEntity.ok(ApiResponse.success(data, "查询备课列表成功"));
         } catch (Exception e) {
             log.error("查询备课列表失败: {}", e.getMessage(), e);
             return ResponseEntity.badRequest()
@@ -259,70 +265,72 @@ public class TeachingContentController {
         }
     }
 
-    // ======================== [跨端联桥] ========================
+    // ======================== VO 转换 ========================
 
     /**
-     * [跨端联桥] 生成备课 —— 接受前端参数，调用 Python AI 服务生成大纲+PPT结构，保存到 DB。
-     *
-     * <h3>完整链路</h3>
-     * <ol>
-     *   <li>前端 POST /api/lesson-prep/generate（传 title/subject/grade/knowledgePointIds 等）</li>
-     *   <li>Java → Python POST /api/internal/ai/generate-lesson-prep</li>
-     *   <li>Python 生成 syllabus + slides（已写入 DB）并返回 JSON</li>
-     *   <li>Java 将 slides（camelCase）写入 teaching_contents.ppt_structure，syllabus 写入 generated_content_json</li>
-     *   <li>返回 prepId + slides 预览给前端</li>
-     *   <li>前端拿到 prepId 后调用 POST /api/ppt/pipeline/{prepId} 触发 PPTX 导出</li>
-     * </ol>
-     */
-    @PostMapping("/generate")
-    @Operation(summary = "[联桥] 生成备课", description = "调用 Python AI 服务生成备课内容并保存到数据库")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> generateLessonPrep(
-            @RequestBody PythonApiClient.LessonPrepRequest request) {
-        log.info("[联桥] 收到备课生成请求: title={}, subject={}", request.getTitle(), request.getSubject());
-
-        try {
-            // Step 1: 调用 Python 生成备课大纲 + PPT 结构
-            PythonApiClient.LessonPrepResponse pythonResult =
-                    pythonApiClient.generateLessonPrep(request);
-
-            // Step 2: 将 Python 返回的 slides（已转 camelCase）写入 ppt_structure，
-            //         syllabus 写入 generated_content_json
-            TeachingContent content = TeachingContent.builder()
-                    .prepId((long) pythonResult.getPrepId())
-                    .userId((long) request.getUserId())
-                    .title(request.getTitle())
-                    .status(STATUS_DRAFT)
-                    .pptStructure(om.writeValueAsString(pythonResult.getSlides()))
-                    .generatedContentJson(om.writeValueAsString(pythonResult.getSyllabus()))
-                    .build();
-            teachingContentService.save(content);
-
-            Map<String, Object> data = new HashMap<>();
-            data.put("prepId", pythonResult.getPrepId());
-            data.put("totalPages", pythonResult.getTotalPages());
-            data.put("slidesPreview", pythonResult.getSlides());
-
-            log.info("[联桥] 备课生成完成, prepId={}, totalPages={}",
-                    pythonResult.getPrepId(), pythonResult.getTotalPages());
-            return ResponseEntity.ok(ApiResponse.success(data, "备课生成成功"));
-
-        } catch (Exception e) {
-            log.error("[联桥] 备课生成失败", e);
-            return ResponseEntity.internalServerError()
-                    .body(ApiResponse.error(500, "备课生成失败: " + e.getMessage()));
-        }
-    }
-
-    /**
-     * 将 TeachingContent 实体转换为 TeachingContentVO
+     * 将 TeachingContent 实体转换为 TeachingContentVO。
+     * <p>从 generated_content_json 解析 subject/grade/knowledgePointIds，
+     * 从 ppt_structure 计算 slideCount，填充 M5→M4 接口契约字段。</p>
      */
     private TeachingContentVO convertToVO(TeachingContent content) {
+        String subject = null;
+        String grade = null;
+        List<Map<String, Object>> knowledgePoints = null;
+
+        // 从 generated_content_json 解析元数据
+        String genJson = content.getGeneratedContentJson();
+        if (genJson != null && !genJson.isBlank()) {
+            try {
+                JsonNode gen = om.readTree(genJson);
+                if (gen.has("subject")) {
+                    subject = gen.get("subject").asText();
+                }
+                if (gen.has("grade")) {
+                    grade = gen.get("grade").asText();
+                }
+                if (gen.has("knowledgePointIds") && gen.get("knowledgePointIds").isArray()) {
+                    knowledgePoints = new ArrayList<>();
+                    for (JsonNode id : gen.get("knowledgePointIds")) {
+                        Map<String, Object> kp = new HashMap<>();
+                        kp.put("id", id.asInt());
+                        knowledgePoints.add(kp);
+                    }
+                }
+            } catch (Exception e) {
+                // 旧格式 generated_content_json 可能是裸 syllabus 对象，忽略解析错误
+            }
+        }
+
+        // 从 ppt_structure 计算 slideCount
+        Integer slideCount = null;
+        String pptJson = content.getPptStructure();
+        if (pptJson != null && !pptJson.isBlank()) {
+            try {
+                JsonNode ppt = om.readTree(pptJson);
+                if (ppt.isArray()) {
+                    slideCount = ppt.size();
+                } else if (ppt.has("slides") && ppt.get("slides").isArray()) {
+                    slideCount = ppt.get("slides").size();
+                }
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+
         return TeachingContentVO.builder()
                 .id(content.getId())
                 .prepId(content.getPrepId())
                 .userId(content.getUserId())
                 .title(content.getTitle())
                 .status(content.getStatus())
+                .type("ppt")
+                .subject(subject)
+                .grade(grade)
+                .slideCount(slideCount)
+                .styleTemplate(content.getTemplateId() != null
+                        ? String.valueOf(content.getTemplateId())
+                        : "default")
+                .knowledgePoints(knowledgePoints)
                 .pptStructure(content.getPptStructure())
                 .templateId(content.getTemplateId())
                 .pptDownloadUrl(content.getPptDownloadUrl())
