@@ -9,6 +9,9 @@ import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
 import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
+import com.treepeople.leapmindtts.service.common.MetricsService;
+import com.treepeople.leapmindtts.service.common.RedisCacheService;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -42,6 +45,9 @@ class ConversationServiceTest {
     @Mock private ConversationSessionMapper sessionMapper;
     @Mock private ConversationMessageMapper messageMapper;
     @Mock private ConversationProperties properties;
+    @Mock private RedisCacheService redisCacheService;
+    @Mock private MetricsService metricsService;
+    @Mock private MeterRegistry meterRegistry;
 
     @Captor private ArgumentCaptor<ConversationSessionEntity> sessionEntityCaptor;
     @Captor private ArgumentCaptor<ConversationMessageEntity> messageEntityCaptor;
@@ -63,7 +69,7 @@ class ConversationServiceTest {
 
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         ConversationRequest req = new ConversationRequest();
         req.setUserId(1001L);
@@ -89,7 +95,7 @@ class ConversationServiceTest {
 
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         String sessionId = "sess_existing";
         String redisJson = "{\"sessionId\":\"" + sessionId + "\",\"userId\":1001,\"sceneType\":\"general_qa\","
@@ -115,7 +121,7 @@ class ConversationServiceTest {
 
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         String sessionId = "sess_db_only";
         when(valueOps.get("user:session:" + sessionId)).thenReturn(null);
@@ -150,7 +156,7 @@ class ConversationServiceTest {
 
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         String sessionId = "sess_redis_get";
         String redisJson = "{\"sessionId\":\"" + sessionId + "\",\"userId\":1001,\"sceneType\":\"general_qa\","
@@ -170,7 +176,7 @@ class ConversationServiceTest {
 
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         when(valueOps.get("user:session:not_exist")).thenReturn(null);
         when(sessionMapper.selectBySessionId("not_exist")).thenReturn(null);
@@ -182,7 +188,7 @@ class ConversationServiceTest {
     void listSessions_shouldReturnUserSessions() {
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         Long userId = 1001L;
         ConversationSessionEntity e1 = new ConversationSessionEntity();
@@ -209,7 +215,7 @@ class ConversationServiceTest {
     void deleteSession_shouldCleanRedisAndDb() {
         service = new ConversationService(aiModelService, aiTeacherBaiduAsrService,
                 webClientBuilder, stringRedisTemplate, sessionMapper, messageMapper,
-                properties, objectMapper);
+                properties, objectMapper, redisCacheService, metricsService, meterRegistry);
 
         service.deleteSession("sess_to_delete");
 

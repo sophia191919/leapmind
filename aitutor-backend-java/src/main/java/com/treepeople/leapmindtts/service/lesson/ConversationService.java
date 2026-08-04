@@ -6,11 +6,16 @@ import com.treepeople.leapmindtts.config.ConversationProperties;
 import com.treepeople.leapmindtts.mapper.ConversationMessageMapper;
 import com.treepeople.leapmindtts.mapper.ConversationSessionMapper;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest;
+import com.treepeople.leapmindtts.service.common.MetricsService;
+import com.treepeople.leapmindtts.service.common.RedisCacheService;
+import com.treepeople.leapmindtts.util.CacheKeyBuilder;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.InputType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
 import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -43,6 +48,9 @@ public class ConversationService {
     private final ConversationMessageMapper messageMapper;
     private final ConversationProperties properties;
     private final ObjectMapper objectMapper;
+    private final RedisCacheService redisCacheService;
+    private final MetricsService metricsService;
+    private final MeterRegistry meterRegistry;
 
     private final ConcurrentHashMap<String, BaseSubscriber<AIModelService.AiChunk>> activeSubscribers = new ConcurrentHashMap<>();
 
@@ -53,7 +61,10 @@ public class ConversationService {
                                ConversationSessionMapper sessionMapper,
                                ConversationMessageMapper messageMapper,
                                ConversationProperties properties,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               RedisCacheService redisCacheService,
+                               MetricsService metricsService,
+                               MeterRegistry meterRegistry) {
         this.aiModelService = aiModelService;
         this.aiTeacherBaiduAsrService = aiTeacherBaiduAsrService;
         this.webClient = webClientBuilder.build();
@@ -62,6 +73,9 @@ public class ConversationService {
         this.messageMapper = messageMapper;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.redisCacheService = redisCacheService;
+        this.metricsService = metricsService;
+        this.meterRegistry = meterRegistry;
     }
 
     @PostConstruct
@@ -149,6 +163,7 @@ public class ConversationService {
         }
 
         var callId = "call_" + UUID.randomUUID().toString().substring(0, 8);
+        final long streamStartNanos = System.nanoTime();
 
         // 语音输入：下载音频 → ASR 转文字 → 替换 question
         if (req.getInputType() == InputType.voice && req.getAttachmentUrls() != null && !req.getAttachmentUrls().isEmpty()) {
@@ -177,9 +192,25 @@ public class ConversationService {
         }
         session.setUpdatedAt(Instant.now().toEpochMilli());
 
+        if (req.getQuestion() != null && !req.getQuestion().isEmpty()) {
+            String cacheKey = CacheKeyBuilder.QUESTION_CACHE_PREFIX + CacheKeyBuilder.questionHash(req.getQuestion());
+            String cached = redisCacheService.get(cacheKey);
+            if (cached != null) {
+                if (RedisCacheService.NULL_PLACEHOLDER.equals(cached)) {
+                    metricsService.incrementQuestionProcessed("cache", "null");
+                    return buildCachedStream(req, session, sessionId, callId, null);
+                }
+                log.info("Redis cache hit, replaying answer for question hash: {}", cacheKey);
+                metricsService.incrementQuestionProcessed("cache", "success");
+                return buildCachedStream(req, session, sessionId, callId, cached);
+            }
+        }
+
         StringBuilder fullAnswer = new StringBuilder();
         AtomicInteger index = new AtomicInteger(0);
         AtomicBoolean messageSaved = new AtomicBoolean(false);
+        AtomicBoolean firstChunk = new AtomicBoolean(false);
+        AtomicBoolean streamFinished = new AtomicBoolean(false);
 
         return Flux.create(fluxSink -> {
             // 1. 先发 thinking 事件（带上 sessionId，打断用）
@@ -191,6 +222,11 @@ public class ConversationService {
                 @Override
                 protected void hookOnNext(AIModelService.AiChunk chunk) {
                     fullAnswer.append(chunk.getChunk());
+
+                    if (firstChunk.compareAndSet(false, true)) {
+                        meterRegistry.timer("conversation.ttft")
+                                .record(Duration.ofNanos(System.nanoTime() - streamStartNanos));
+                    }
 
                     if (chunk.isLast()) {
                         String answer = fullAnswer.toString();
@@ -205,6 +241,9 @@ public class ConversationService {
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
 
+                        cacheAnswerIfNeeded(req, answer);
+                        metricsService.incrementQuestionProcessed("full", "success");
+                        streamFinished.set(true);
                         fluxSink.next(sseEvent("message",
                             String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":%d,\"output\":%d}}",
                                 callId, sessionId,
@@ -241,6 +280,9 @@ public class ConversationService {
                 protected void hookOnError(Throwable t) {
                     if (messageSaved.get()) return;
                     log.error("AI stream error for session {}: {}", sessionId, t.getMessage());
+                    streamFinished.set(true);
+                    meterRegistry.counter("conversation.stream.error").increment();
+                    metricsService.incrementQuestionProcessed("full", "error");
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"error\",\"message\":\"%s\"}", escapeJson(t.getMessage()))));
                     fluxSink.complete();
@@ -258,6 +300,9 @@ public class ConversationService {
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
                     }
+                    cacheAnswerIfNeeded(req, answer);
+                    metricsService.incrementQuestionProcessed("full", "success");
+                    streamFinished.set(true);
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}",
                             callId, sessionId)));
@@ -278,17 +323,62 @@ public class ConversationService {
 
             fluxSink.onCancel(() -> {
                 log.info("Flux cancelled for session: {}", sessionId);
+                if (streamFinished.compareAndSet(false, true)) {
+                    meterRegistry.counter("conversation.stream.disconnect").increment();
+                }
                 cleanup(sessionId);
             });
             fluxSink.onDispose(() -> {
                 log.info("Flux disposed for session: {}", sessionId);
+                if (streamFinished.compareAndSet(false, true)) {
+                    meterRegistry.counter("conversation.stream.disconnect").increment();
+                }
                 cleanup(sessionId);
             });
         });
     }
 
+    private Flux<ServerSentEvent<?>> buildCachedStream(ConversationRequest req, ConversationSession session,
+                                                       String sessionId, String callId, String answer) {
+        if (answer != null && !answer.isEmpty()) {
+            session.getMessages().add(Map.of("role", "assistant", "content", answer));
+            saveMessageToDb(sessionId, "assistant", answer, 0, 0, callId);
+            int msgCount = messageMapper.selectBySessionId(sessionId).size();
+            sessionMapper.updateMessageCount(sessionId, msgCount);
+            saveSessionToRedis(session);
+        }
+        return Flux.create(fluxSink -> {
+            fluxSink.next(sseEvent("message",
+                String.format("{\"type\":\"thinking\",\"content\":\"\",\"sessionId\":\"%s\"}", sessionId)));
+            if (answer != null && !answer.isEmpty()) {
+                fluxSink.next(sseEvent("message",
+                    String.format("{\"type\":\"content\",\"chunk\":\"%s\",\"index\":0}", escapeJson(answer))));
+            }
+            fluxSink.next(sseEvent("message",
+                String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}",
+                    callId, sessionId)));
+            fluxSink.complete();
+        });
+    }
+
+    private void cacheAnswerIfNeeded(ConversationRequest req, String answer) {
+        try {
+            String cacheKey = CacheKeyBuilder.QUESTION_CACHE_PREFIX + CacheKeyBuilder.questionHash(req.getQuestion());
+            if (answer != null && !answer.isEmpty()) {
+                redisCacheService.set(cacheKey, answer, Duration.ofHours(1));
+                log.info("Cached AI answer to Redis: key={}, ttl=1h", cacheKey);
+            } else {
+                redisCacheService.setNullPlaceholder(cacheKey);
+                log.info("Cached null placeholder to Redis: key={}", cacheKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to cache answer: {}", e.getMessage());
+        }
+    }
+
     public void interrupt(String sessionId) {
         log.info("Interrupting session: {}", sessionId);
+        meterRegistry.counter("conversation.interrupt.count").increment();
 
         // 先发打断事件（如果有 session 尚在连接中）
         // Flux.create 方式下无法直接向 fluxSink 发事件，
