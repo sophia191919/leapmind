@@ -65,6 +65,11 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
   // --- 持久化：每次状态变化写入 localStorage ---
   useEffect(() => {
     if (session && Object.keys(answers).length > 0) {
+      const completed = session.questions.every((question) => answers[question.questionId]?.submitted);
+      if (completed) {
+        localStorage.removeItem(SESSION_KEY);
+        return;
+      }
       try {
         localStorage.setItem(SESSION_KEY, JSON.stringify({
           session,
@@ -83,6 +88,21 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.session?.questions?.length > 0) {
+          if (parsed.session.questions.some((question) => question._originalId)) {
+            localStorage.removeItem(SESSION_KEY);
+            setShowSetup(true);
+            setLoading(false);
+            return;
+          }
+          const completed = parsed.session.questions.every(
+            (question) => parsed.answers?.[question.questionId]?.submitted
+          );
+          if (completed) {
+            localStorage.removeItem(SESSION_KEY);
+            setShowSetup(true);
+            setLoading(false);
+            return;
+          }
           setHasSavedSession(true);
           setSession(parsed.session);
           setCurrentIndex(parsed.currentIndex || 0);
@@ -113,6 +133,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
     setHasSavedSession(false);
     setShowSetup(false);
     setSetupError("");
+    setSubmitError("");
     localStorage.removeItem(SESSION_KEY);
     try {
       const data = await generateSession({
@@ -154,6 +175,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
     setCurrentIndex(0);
     setAnswers({});
     setSetupError("");
+    setSubmitError("");
     setShowSetup(true);
     setLoading(false);
   };
@@ -198,6 +220,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
   const handleSelectAnswer = useCallback(
     (answer) => {
       if (!currentQuestion || currentAnswer?.submitted) return;
+      setSubmitError("");
       setAnswers((prev) => ({
         ...prev,
         [currentQuestion.questionId]: {
@@ -212,6 +235,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
   // --- 提交答案 ---
   const handleSubmit = async () => {
     if (!currentQuestion || !currentAnswer?.selectedAnswer || submitting) return;
+    setSubmitError("");
     setSubmitting(true);
     try {
       const result = await submitAnswer({
@@ -232,6 +256,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
       }));
     } catch (err) {
       console.error("提交失败:", err);
+      setSubmitError(err.message || "答案提交失败，答题记录尚未保存，请重试");
     } finally {
       setSubmitting(false);
     }
@@ -240,12 +265,14 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
   // --- 下一题 ---
   const handleNext = () => {
     if (currentIndex < session.questions.length - 1) {
+      setSubmitError("");
       setCurrentIndex((i) => i + 1);
     }
   };
 
   // --- 跳转题目 ---
   const handleJump = (index) => {
+    setSubmitError("");
     setCurrentIndex(index);
   };
 
@@ -387,7 +414,7 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
               <RotateCcw size={16} /> 再练一组
             </button>
             <button
-              onClick={onBack}
+              onClick={onViewStatistics}
               className="px-5 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl font-medium hover:bg-slate-50 transition-colors flex items-center gap-2 cursor-pointer"
             >
               <BarChart3 size={16} /> 查看统计
@@ -460,6 +487,13 @@ export default function PracticePage({ onBack, embedded = false, mode = "FREE_PR
           isSubmitted={currentAnswer?.submitted}
           isCorrect={currentAnswer?.isCorrect}
         />
+
+        {submitError && (
+          <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <AlertCircle size={17} className="mt-0.5 flex-shrink-0" />
+            <span>{submitError}</span>
+          </div>
+        )}
 
         {/* 底部操作栏 */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
