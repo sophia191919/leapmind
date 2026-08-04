@@ -493,34 +493,6 @@ export async function getCheckinStatus() {
   }
 }
 
-/**
- * 获取当前登录用户已到期的 AI 复习提醒。
- * 用户身份由后端从 JWT 中读取，前端不传 userId。
- */
-export async function getReviewReminders() {
-  const res = await request('/api/practice/review-reminders');
-  return (unwrap(res) || []).map((item) => ({
-    id: item.id,
-    courseId: item.courseId || '',
-    type: item.reminderType || 'REVIEW',
-    content: item.content || '知识点复习',
-    scheduledDate: item.scheduledDate || '',
-    priority: Number(item.priority) || 0,
-    isReviewed: Number(item.isReviewed) === 1,
-  }));
-}
-
-/**
- * 完成一条 AI 复习提醒。
- */
-export async function completeReviewReminder(reminderId, notes = '') {
-  const res = await request(`/api/practice/review-reminders/${reminderId}/complete`, {
-    method: 'POST',
-    body: JSON.stringify({ notes }),
-  });
-  return unwrap(res);
-}
-
 // ============================================================================
 // 🔶 部分对接（数据字段不全，后续需要完善）
 // ============================================================================
