@@ -9,6 +9,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 
 /**
  * 事件采集控制器
@@ -40,6 +43,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/events")
 @RequiredArgsConstructor
+@Tag(name = "Event Collection - 事件采集", description = "为 M1/M2/M4/M7 提供统一的事件采集上报接口")
 public class EventCollectionController {
 
     private final EventCollectionService eventCollectionService;
@@ -74,6 +78,9 @@ public class EventCollectionController {
      * @param event 事件数据
      * @return HTTP 200 + 保存后的事件（含数据库生成的 ID）
      */
+    @Operation(summary = "采集单条事件", description = "M1/M2/M4/M7 各模块在用户完成学习行为后调用，上报一条事件数据。"
+            + " module、eventType、userId 为必填，eventData 为 JSON 字符串自由格式，eventTime 不填则默认当前时间。"
+            + " 调用成功返回 HTTP 200 + 保存后的事件（含数据库自动生成的 id 和 createdAt）。")
     @PostMapping("/collect")
     public ResponseEntity<ApiResponse<EventCollection>> collectEvent(@RequestBody EventCollection event) {
         log.info("采集事件，模块: {}, 类型: {}", event.getModule(), event.getEventType());
@@ -97,6 +104,8 @@ public class EventCollectionController {
      * @param events 事件列表（JSON 数组）
      * @return HTTP 200 + 保存后的事件列表
      */
+    @Operation(summary = "批量采集事件", description = "模块同步历史数据或定时批量上报，请求体为事件对象数组。"
+            + " 单次最多 100 条，超出可能超时。每条事件的字段规则同单条采集接口。")
     @PostMapping("/collect/batch")
     public ResponseEntity<ApiResponse<List<EventCollection>>> collectEvents(@RequestBody List<EventCollection> events) {
         log.info("批量采集事件，共 {} 条", events.size());
@@ -118,8 +127,10 @@ public class EventCollectionController {
      * @param module 模块标识（M1/M2/M4/M7）
      * @return HTTP 200 + 未处理事件列表，按发生时间升序
      */
+    @Operation(summary = "查询未处理事件", description = "按模块标识返回该模块所有 processed=0 的事件，按发生时间升序排列。供定时任务和管理后台使用。")
     @GetMapping("/unprocessed/{module}")
-    public ResponseEntity<ApiResponse<List<EventCollection>>> getUnprocessedEvents(@PathVariable String module) {
+    public ResponseEntity<ApiResponse<List<EventCollection>>> getUnprocessedEvents(
+            @Parameter(description = "模块标识：M1/M2/M4/M7", example = "M1", required = true) @PathVariable String module) {
         log.info("查询模块 {} 未处理的事件", module);
 
         try {
@@ -139,8 +150,10 @@ public class EventCollectionController {
      * @param userId 用户ID
      * @return HTTP 200 + 用户事件列表
      */
+    @Operation(summary = "查询用户事件", description = "查询指定用户的所有学习行为事件，按时间降序排列。用于查看用户学习时间线。")
     @GetMapping("/user/{userId}")
-    public ResponseEntity<ApiResponse<List<EventCollection>>> getUserEvents(@PathVariable Long userId) {
+    public ResponseEntity<ApiResponse<List<EventCollection>>> getUserEvents(
+            @Parameter(description = "用户ID，必填", example = "10086", required = true) @PathVariable Long userId) {
         log.info("查询用户 {} 的事件数据", userId);
 
         try {
@@ -160,8 +173,10 @@ public class EventCollectionController {
      * @param eventId 事件ID
      * @return HTTP 200 + 成功消息
      */
+    @Operation(summary = "标记事件已处理", description = "定时任务处理完某事件后调用，将 processed 置为 1，processedAt 设为当前时间。防止重复处理。")
     @PutMapping("/{eventId}/processed")
-    public ResponseEntity<ApiResponse<String>> markAsProcessed(@PathVariable Long eventId) {
+    public ResponseEntity<ApiResponse<String>> markAsProcessed(
+            @Parameter(description = "事件ID，必填", example = "1", required = true) @PathVariable Long eventId) {
         log.info("标记事件 {} 为已处理", eventId);
 
         try {
