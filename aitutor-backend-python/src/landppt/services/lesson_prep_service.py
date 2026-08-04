@@ -585,7 +585,7 @@ class LessonPrepService:
     # ════════════════════════════════════════════════════════════
 
     async def _save_to_db(self, ctx: PrepContext) -> int:
-        """Write the syllabus to teaching_contents table (PPT/narrations generated separately)."""
+        """Write the syllabus to teaching_contents table."""
         from ..database.database import AsyncSessionLocal
         from ..database.models import TeachingContent
 
