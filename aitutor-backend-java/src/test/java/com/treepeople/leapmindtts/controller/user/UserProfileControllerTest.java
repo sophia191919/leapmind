@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.exception.UserNotFoundException;
 import com.treepeople.leapmindtts.pojo.dto.MarkReviewedRequest;
 import com.treepeople.leapmindtts.pojo.vo.ReviewReminderVO;
-import com.treepeople.leapmindtts.service.profile.security.ProfileActorResolver;
 import com.treepeople.leapmindtts.service.user.ReviewReminderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -64,12 +63,9 @@ class UserProfileControllerTest {
     @Mock
     private ReviewReminderService reviewReminderService;
 
-    @Mock
-    private ProfileActorResolver profileActorResolver;
-
     @BeforeEach
     void setUp() {
-        UserProfileController controller = new UserProfileController(reviewReminderService, profileActorResolver);
+        UserProfileController controller = new UserProfileController(reviewReminderService);
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
                 .setControllerAdvice()

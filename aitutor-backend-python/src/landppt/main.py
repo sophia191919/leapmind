@@ -16,6 +16,9 @@ from .api.database_api import router as database_router
 from .api.global_master_template_api import router as template_api_router
 from .api.config_api import router as config_router
 from .api.image_api import router as image_router
+from .api.lesson_prep_api import router as lesson_prep_router
+
+from .api.weak_points_api import router as weak_points_router
 
 from .web import router as web_router
 from .auth import auth_router, create_auth_middleware
@@ -100,7 +103,9 @@ app.include_router(openai_router, prefix="/v1", tags=["OpenAI Compatible"])
 app.include_router(landppt_router, prefix="/api", tags=["LandPPT API"])
 app.include_router(template_api_router, tags=["Global Master Templates"])
 app.include_router(database_router, tags=["Database Management"])
+app.include_router(weak_points_router, tags=["Learning Analysis"])
 app.include_router(web_router, prefix="", tags=["Web Interface"])
+app.include_router(lesson_prep_router)
 
 # Mount static files
 import os
