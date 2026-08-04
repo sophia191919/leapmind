@@ -212,6 +212,13 @@ knife4j:
     enable-swagger-models: true
     enable-document-manage: true
 
+# [跨端联桥] Python AI 服务地址（对应 internal_ai.py 暴露的端口 8001）
+python:
+  service:
+    base-url: http://localhost:8001
+    connect-timeout: 30000
+    read-timeout: 180000
+
 # MinIO对象存储配置（PPT、音频文件上传使用）
 minio:
   endpoint: http://127.0.0.1:9000
