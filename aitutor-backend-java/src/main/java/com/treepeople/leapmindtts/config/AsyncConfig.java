@@ -2,6 +2,7 @@ package com.treepeople.leapmindtts.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
@@ -19,6 +20,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 public class AsyncConfig {
 
     @Bean(name = "taskExecutor")
+    @Primary
     public Executor taskExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(10);
@@ -54,5 +56,24 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
-    
+
+    /**
+     * [SSE流式] 备课生成流式透传专用线程池。
+     * 用途：承载 Python → Java → 前端 的 SSE 流式处理后台线程（每个请求占用1条线程读 WebClient 流并写入 SseEmitter）。
+     * 设计：核心5/最大20，队列80；拒绝策略 CallerRunsPolicy 避免流式请求被丢弃。
+     */
+    @Bean(name = "sseStreamExecutor")
+    public Executor sseStreamExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(5);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(80);
+        executor.setThreadNamePrefix("sse-stream-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(120);
+        executor.initialize();
+        return executor;
+    }
+
 }
