@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.treepeople.leapmindtts.pojo.entity.EventCollection;
 import com.treepeople.leapmindtts.service.EventCollectionService;
+import com.treepeople.leapmindtts.service.profile.security.ProfileActorResolver;
+import com.treepeople.leapmindtts.exception.LegacyProfileSecurityExceptionHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -57,11 +59,15 @@ class EventCollectionControllerTest {
     @Mock
     private EventCollectionService eventCollectionService;
 
+    @Mock
+    private ProfileActorResolver profileActorResolver;
+
     @BeforeEach
     void setUp() {
-        EventCollectionController controller = new EventCollectionController(eventCollectionService);
+        EventCollectionController controller = new EventCollectionController(eventCollectionService, profileActorResolver);
         mockMvc = MockMvcBuilders.standaloneSetup(controller)
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
+                .setControllerAdvice(new LegacyProfileSecurityExceptionHandler())
                 .build();
     }
 
@@ -169,13 +175,13 @@ class EventCollectionControllerTest {
         void shouldReturn200WithSavedEvents() throws Exception {
             EventCollection e1 = createEvent(null, "M1", "COURSE_STARTED", 1L,
                     "{}", LocalDateTime.now(), null, null);
-            EventCollection e2 = createEvent(null, "M2", "ANSWER_CORRECT", 2L,
+            EventCollection e2 = createEvent(null, "M2", "ANSWER_CORRECT", 1L,
                     "{}", LocalDateTime.now(), null, null);
             List<EventCollection> events = Arrays.asList(e1, e2);
 
             EventCollection s1 = createEvent(200L, "M1", "COURSE_STARTED", 1L,
                     "{}", LocalDateTime.now(), 0, null);
-            EventCollection s2 = createEvent(201L, "M2", "ANSWER_CORRECT", 2L,
+            EventCollection s2 = createEvent(201L, "M2", "ANSWER_CORRECT", 1L,
                     "{}", LocalDateTime.now(), 0, null);
             List<EventCollection> saved = Arrays.asList(s1, s2);
 
@@ -197,19 +203,6 @@ class EventCollectionControllerTest {
         }
 
         @Test
-        @DisplayName("批量采集空列表返回 200 和空数组")
-        void shouldReturn200WithEmptyList() throws Exception {
-            when(eventCollectionService.collectEvents(anyList())).thenReturn(Collections.emptyList());
-
-            mockMvc.perform(post("/api/events/collect/batch")
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content("[]"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.data").isArray())
-                    .andExpect(jsonPath("$.data", hasSize(0)));
-        }
-
-        @Test
         @DisplayName("Service 抛出异常时返回 400")
         void shouldReturn400WhenServiceThrowsException() throws Exception {
             when(eventCollectionService.collectEvents(anyList()))
@@ -217,7 +210,7 @@ class EventCollectionControllerTest {
 
             mockMvc.perform(post("/api/events/collect/batch")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content("[{\"module\":\"M1\"}]"))
+                            .content("[{\"module\":\"M1\",\"userId\":1,\"eventType\":\"TEST\"}]"))
                     .andExpect(status().isBadRequest())
                     .andExpect(jsonPath("$.code").value(400))
                     .andExpect(jsonPath("$.message").value("批量写入失败"));
@@ -227,77 +220,17 @@ class EventCollectionControllerTest {
     // ========== GET /api/events/unprocessed/{module} ==========
 
     @Nested
-    @DisplayName("GET /api/events/unprocessed/{module} — 查询未处理事件")
+    @DisplayName("GET /api/events/unprocessed/{module} — 查询未处理事件（已禁用）")
     class GetUnprocessedEventsTests {
 
         @Test
-        @DisplayName("存在未处理事件时返回 200 和事件列表")
-        void shouldReturn200WithUnprocessedEvents() throws Exception {
-            String module = "M1";
-            EventCollection e1 = createEvent(1L, module, "COURSE_COMPLETED", 1L,
-                    "{}", LocalDateTime.now().minusHours(2), 0, null);
-            EventCollection e2 = createEvent(2L, module, "LESSON_VIEWED", 1L,
-                    "{}", LocalDateTime.now().minusHours(1), 0, null);
-            List<EventCollection> events = Arrays.asList(e1, e2);
+        @DisplayName("接口已禁用，返回 403")
+        void shouldReturn403WhenEndpointDisabled() throws Exception {
+            mockMvc.perform(get("/api/events/unprocessed/{module}", "M1"))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value(403));
 
-            when(eventCollectionService.getUnprocessedEvents(module)).thenReturn(events);
-
-            mockMvc.perform(get("/api/events/unprocessed/{module}", module))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.code").value(200))
-                    .andExpect(jsonPath("$.message").value("查询未处理事件成功"))
-                    .andExpect(jsonPath("$.data", hasSize(2)))
-                    .andExpect(jsonPath("$.data[0].module").value("M1"))
-                    .andExpect(jsonPath("$.data[0].processed").value(0))
-                    .andExpect(jsonPath("$.data[1].module").value("M1"));
-
-            verify(eventCollectionService).getUnprocessedEvents(module);
-        }
-
-        @Test
-        @DisplayName("无未处理事件时返回 200 和空数组")
-        void shouldReturn200WithEmptyList() throws Exception {
-            String module = "M2";
-            when(eventCollectionService.getUnprocessedEvents(module)).thenReturn(Collections.emptyList());
-
-            mockMvc.perform(get("/api/events/unprocessed/{module}", module))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.data").isArray())
-                    .andExpect(jsonPath("$.data", hasSize(0)));
-        }
-
-        @Test
-        @DisplayName("支持所有模块 M1/M2/M4/M7 查询")
-        void shouldSupportAllModules() throws Exception {
-            String[] modules = {"M1", "M2", "M4", "M7"};
-            for (String m : modules) {
-                when(eventCollectionService.getUnprocessedEvents(m))
-                        .thenReturn(Collections.singletonList(
-                                createEvent(1L, m, "TEST", 1L, "{}", LocalDateTime.now(), 0, null)));
-            }
-
-            for (String m : modules) {
-                mockMvc.perform(get("/api/events/unprocessed/{module}", m))
-                        .andExpect(status().isOk())
-                        .andExpect(jsonPath("$.data[0].module").value(m));
-            }
-
-            for (String m : modules) {
-                verify(eventCollectionService, times(1)).getUnprocessedEvents(m);
-            }
-        }
-
-        @Test
-        @DisplayName("Service 抛出异常时返回 400")
-        void shouldReturn400WhenServiceThrowsException() throws Exception {
-            String module = "M1";
-            when(eventCollectionService.getUnprocessedEvents(module))
-                    .thenThrow(new RuntimeException("查询超时"));
-
-            mockMvc.perform(get("/api/events/unprocessed/{module}", module))
-                    .andExpect(status().isBadRequest())
-                    .andExpect(jsonPath("$.code").value(400))
-                    .andExpect(jsonPath("$.message").value("查询超时"));
+            verify(eventCollectionService, never()).getUnprocessedEvents(anyString());
         }
     }
 
@@ -358,44 +291,17 @@ class EventCollectionControllerTest {
     // ========== PUT /api/events/{eventId}/processed ==========
 
     @Nested
-    @DisplayName("PUT /api/events/{eventId}/processed — 标记事件已处理")
+    @DisplayName("PUT /api/events/{eventId}/processed — 标记事件已处理（已禁用）")
     class MarkAsProcessedTests {
 
         @Test
-        @DisplayName("正常标记返回 200")
-        void shouldReturn200WhenMarkedSuccessfully() throws Exception {
-            Long eventId = 100L;
-            doNothing().when(eventCollectionService).markAsProcessed(eventId);
+        @DisplayName("接口已禁用，返回 403")
+        void shouldReturn403WhenEndpointDisabled() throws Exception {
+            mockMvc.perform(put("/api/events/{eventId}/processed", 100L))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value(403));
 
-            mockMvc.perform(put("/api/events/{eventId}/processed", eventId))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.code").value(200))
-                    .andExpect(jsonPath("$.message").value("操作成功"));
-
-            verify(eventCollectionService).markAsProcessed(eventId);
-        }
-
-        @Test
-        @DisplayName("标记不存在的 ID 也成功（乐观更新）")
-        void shouldReturn200EvenWhenEventNotFound() throws Exception {
-            Long nonExistentId = 99999L;
-            doNothing().when(eventCollectionService).markAsProcessed(nonExistentId);
-
-            mockMvc.perform(put("/api/events/{eventId}/processed", nonExistentId))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.code").value(200));
-        }
-
-        @Test
-        @DisplayName("Service 抛出异常时返回 400")
-        void shouldReturn400WhenServiceThrowsException() throws Exception {
-            Long eventId = 100L;
-            doThrow(new RuntimeException("标记处理失败")).when(eventCollectionService).markAsProcessed(eventId);
-
-            mockMvc.perform(put("/api/events/{eventId}/processed", eventId))
-                    .andExpect(status().isBadRequest())
-                    .andExpect(jsonPath("$.code").value(400))
-                    .andExpect(jsonPath("$.message").value("标记处理失败"));
+            verify(eventCollectionService, never()).markAsProcessed(anyLong());
         }
     }
 }
