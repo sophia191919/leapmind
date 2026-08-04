@@ -26,7 +26,6 @@ import {
   CalendarCheck,
   ListChecks,
   Shuffle,
-  AlertCircle,
 } from "lucide-react";
 import QuestionCard from "../components/practice/QuestionCard";
 import ProgressBar from "../components/practice/ProgressBar";
@@ -39,7 +38,7 @@ import { getUserInfo } from "../utils/tokenManager";
 const SESSION_KEY = "m1_practice_session";
 const QUICK_COUNTS = [5, 10, 15, 20];
 
-export default function PracticePage({ onBack, onViewStatistics, embedded = false, mode = "FREE_PRACTICE", lessonId = "", initialParams = {} }) {
+export default function PracticePage({ onBack, embedded = false, mode = "FREE_PRACTICE", lessonId = "", initialParams = {} }) {
   // --- ChatPanel 状态 ---
   const [chatPanelOpen, setChatPanelOpen] = useState(false);
   const userInfo = getUserInfo();
@@ -54,7 +53,6 @@ export default function PracticePage({ onBack, onViewStatistics, embedded = fals
   const [answers, setAnswers] = useState({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState("");
   const [hasSavedSession, setHasSavedSession] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const [setupError, setSetupError] = useState("");
