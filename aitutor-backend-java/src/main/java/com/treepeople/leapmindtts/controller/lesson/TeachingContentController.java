@@ -13,12 +13,16 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 /**
@@ -36,7 +40,15 @@ public class TeachingContentController {
     // [跨端联桥] 调用 Python AI 服务生成备课内容
     private final PythonApiClient pythonApiClient;
     private final ObjectMapper om;
-    
+
+    /**
+     * SSE 流式任务线程池（Bean 名 = sseStreamExecutor，Spring 按构造参数名匹配注入）。
+     */
+    private final Executor sseStreamExecutor;
+
+    /** SSE 流式端点超时：35 分钟（三段备课管线极端情况 30min + 5min 缓冲） */
+    private static final long SSE_STREAM_TIMEOUT_MS = 35L * 60L * 1000L;
+
     /** 草稿 */
     private static final String STATUS_DRAFT = "draft";
     /** 已发布 */
@@ -310,6 +322,129 @@ public class TeachingContentController {
             log.error("[联桥] 备课生成失败", e);
             return ResponseEntity.internalServerError()
                     .body(ApiResponse.error(500, "备课生成失败: " + e.getMessage()));
+        }
+    }
+
+    // ======================== [跨端联桥] SSE 流式 ========================
+
+    /**
+     * [联桥-SSE] 流式生成备课 —— 三阶段管线（大纲→PPT→讲解词）实时推送到前端。
+     *
+     * <h3>事件流顺序（与 Python lesson_prep_service 对齐，event name = camelCase）</h3>
+     * <pre>
+     *   event: outline          { title, subject, grade, sections:[...] }          — Stage 1 完成：完整教学大纲
+     *   event: section          { hourIndex, title, teachingGoals, ... } × N      — Stage 1：逐课时
+     *   event: slide            { pageNum, type, title, bulletPoints, ... } × N   — Stage 2：逐页 PPT
+     *   event: slidesDone       { totalPages }                                    — Stage 2 完成
+     *   event: narration        { pageNum, narrationText, estimatedDurationSeconds } × N
+     *                                                                              — Stage 3：逐页讲解词（同时自动回填 slide.notes）
+     *   event: warn             { message, ... }                                  — 非致命警告
+     *   event: error            { stage, message, errorCode }                     — 致命错误
+     *   event: saved            { prepId, totalPages, slidesPreview }             — [Java 注入] Python done 之后 DB 持久化完成
+     *   event: done             { prepId, totalPages, totalDurationSeconds, errors }  — Python done 事件
+     * </pre>
+     *
+     * <p>注意：由于 SSE 标准前端浏览器 EventSource 仅支持 GET，前端需要用 fetch + ReadableStream 手动解析该端点。</p>
+     */
+    @PostMapping(value = "/generate/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "[联桥-SSE] 流式生成备课", description = "调用 Python 三阶段备课管线并 SSE 实时推送；完成后自动保存到 DB 返回 saved 事件")
+    public SseEmitter generateLessonPrepStream(
+            @RequestBody PythonApiClient.LessonPrepRequest request) {
+        log.info("[联桥-SSE] 收到流式备课请求 title={}, subject={}", request.getTitle(), request.getSubject());
+
+        // 1. 创建 SseEmitter 并设置超时（SseEmitter 超时从 Tomcat HTTP 线程释放角度控制）
+        SseEmitter emitter = new SseEmitter(SSE_STREAM_TIMEOUT_MS);
+
+        // 2. 发送"启动"事件，让前端知道流已接通（可选，避免前端长时间等待）
+        try {
+            Map<String, Object> startData = new HashMap<>();
+            startData.put("status", "STARTED");
+            startData.put("message", "AI 备课生成开始");
+            startData.put("title", request.getTitle());
+            startData.put("subject", request.getSubject());
+            startData.put("timestamp", System.currentTimeMillis());
+            emitter.send(SseEmitter.event().name("started").data(startData, MediaType.APPLICATION_JSON));
+        } catch (IOException e) {
+            log.warn("[联桥-SSE] 发送 started 事件失败（可能前端已断开）", e);
+            emitter.completeWithError(e);
+            return emitter;
+        }
+
+        // 3. 注册超时/错误回调：打日志 + emitter 完成（避免线程泄漏）
+        emitter.onTimeout(() -> log.warn("[联桥-SSE] 端点超时 title={}", request.getTitle()));
+        emitter.onError(t -> log.warn("[联桥-SSE] 端点错误 title={} err={}", request.getTitle(), t.toString()));
+        emitter.onCompletion(() -> log.debug("[联桥-SSE] 端点完成 title={}", request.getTitle()));
+
+        // 4. 提交流式任务到专用线程池（否则会占着 Tomcat HTTP 线程直到生成结束）
+        sseStreamExecutor.execute(() -> {
+            try {
+                // 4a. 调用 PythonApiClient 流式读取并透传事件
+                PythonApiClient.StreamedLessonPrepResult result =
+                        pythonApiClient.streamLessonPrep(request, emitter);
+
+                // 4b. DB 持久化：流式累积完毕后写入 teaching_contents
+                TeachingContent saved = persistStreamResult(request, result);
+
+                // 4c. 发送 saved 事件（表示 Java 侧已落盘，前端可以放心跳转编辑页）
+                Map<String, Object> savedEvent = new HashMap<>();
+                savedEvent.put("prepId", saved != null ? saved.getPrepId() : (long) result.getPrepId());
+                savedEvent.put("totalPages", result.getTotalPages());
+                savedEvent.put("slidesPreview", result.getSlides());
+                savedEvent.put("errors", result.getErrors());
+                savedEvent.put("savedAt", System.currentTimeMillis());
+                try {
+                    emitter.send(SseEmitter.event().name("saved").data(savedEvent, MediaType.APPLICATION_JSON));
+                } catch (Exception ignore) {
+                    // SseEmitter 可能已在 streamLessonPrep 的 done 事件中完成；忽略
+                }
+                emitter.complete();
+
+            } catch (Exception e) {
+                log.error("[联桥-SSE] 流式任务执行异常 title={}", request.getTitle(), e);
+                try {
+                    Map<String, Object> err = new HashMap<>();
+                    err.put("stage", "all");
+                    err.put("errorCode", "STREAM_TASK_EXCEPTION");
+                    err.put("message", e.getMessage() != null ? e.getMessage() : "unknown exception");
+                    err.put("timestamp", System.currentTimeMillis());
+                    emitter.send(SseEmitter.event().name("error").data(err, MediaType.APPLICATION_JSON));
+                } catch (Exception ignore) {}
+                emitter.completeWithError(e);
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 将 Python 流式结果写入 teaching_contents 表。
+     * 逻辑与非流式 generateLessonPrep 保持一致：slides → ppt_structure，syllabus → generated_content_json。
+     * 如果 result.prepId == 0（Python 返回占位 0），则让 MyBatis 自增 id，并将 prepId 设置为等同 id 的值写入 DB 返回给前端。
+     * 这里不做修改数据库约束的操作（遵循项目不修改 DB schema 约束）。
+     */
+    private TeachingContent persistStreamResult(PythonApiClient.LessonPrepRequest request,
+                                                PythonApiClient.StreamedLessonPrepResult result) {
+        try {
+            long prepId = result.getPrepId() > 0 ? (long) result.getPrepId() : System.currentTimeMillis() / 1000L;
+
+            TeachingContent content = TeachingContent.builder()
+                    .prepId(prepId)
+                    .userId((long) request.getUserId())
+                    .title(request.getTitle())
+                    .status(STATUS_DRAFT)
+                    .pptStructure(om.writeValueAsString(result.getSlides()))
+                    .generatedContentJson(result.getSyllabus() != null
+                            ? om.writeValueAsString(result.getSyllabus())
+                            : null)
+                    .build();
+            teachingContentService.save(content);
+
+            log.info("[联桥-SSE] 备课已保存 prepId={}, slides={}", prepId, result.getSlides().size());
+            return content;
+        } catch (Exception e) {
+            log.error("[联桥-SSE] 持久化失败 title={}", request.getTitle(), e);
+            // 持久化失败不打流产出：前端会收到 done 但没 saved，用户可手动触发保存
+            return null;
         }
     }
 
