@@ -48,3 +48,34 @@ class TimelineResponse(BaseModel):
     """学习时间线响应模型"""
     user_id: int
     events: list[TimelineItem]
+
+
+class BuildProfileRequest(BaseModel):
+    """在线画像计算请求模型（profile-engine-contract.yaml）"""
+    user_id: int
+    events: list[dict]
+    force_refresh: bool = False
+
+
+class KnowledgeMasteryItem(BaseModel):
+    """单个知识点的掌握程度（V6 格式）"""
+    kp_id: int
+    kp_name: str
+    mastery_level: float
+    review_count: int
+    last_reviewed: Optional[str]
+
+
+class ProfileData(BaseModel):
+    """用户画像数据（V5 格式）"""
+    user_id: int
+    knowledge_mastery: list[KnowledgeMasteryItem]
+    overall_mastery: float
+    calculated_at: str
+
+
+class BuildProfileResponse(BaseModel):
+    """在线画像计算响应模型"""
+    success: bool
+    data: Optional[ProfileData]
+    message: Optional[str]
