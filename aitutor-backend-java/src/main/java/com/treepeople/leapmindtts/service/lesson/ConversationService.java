@@ -6,16 +6,16 @@ import com.treepeople.leapmindtts.config.ConversationProperties;
 import com.treepeople.leapmindtts.mapper.ConversationMessageMapper;
 import com.treepeople.leapmindtts.mapper.ConversationSessionMapper;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest;
-import com.treepeople.leapmindtts.service.common.MetricsService;
-import com.treepeople.leapmindtts.service.common.RedisCacheService;
-import com.treepeople.leapmindtts.util.CacheKeyBuilder;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.InputType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
 import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
-import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
-import io.micrometer.core.instrument.MeterRegistry;
+// 【引入缺失的优化组件与工具类】
+import com.treepeople.leapmindtts.service.common.RedisCacheService;
+import com.treepeople.leapmindtts.service.common.MetricsService;
+import com.treepeople.leapmindtts.util.CacheKeyBuilder;
+
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -48,12 +48,18 @@ public class ConversationService {
     private final ConversationMessageMapper messageMapper;
     private final ConversationProperties properties;
     private final ObjectMapper objectMapper;
+
+    // 【新增】注入优化组件服务
     private final RedisCacheService redisCacheService;
     private final MetricsService metricsService;
-    private final MeterRegistry meterRegistry;
+    private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
+    private final com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService;
 
     private final ConcurrentHashMap<String, BaseSubscriber<AIModelService.AiChunk>> activeSubscribers = new ConcurrentHashMap<>();
 
+    public static final String NULL_PLACEHOLDER = "__NULL__";
+
+    // 【修改】在构造函数中补充 RedisCacheService 和 MetricsService 的注入
     public ConversationService(AIModelService aiModelService,
                                AiTeacherBaiduAsrService aiTeacherBaiduAsrService,
                                WebClient.Builder webClientBuilder,
@@ -64,7 +70,8 @@ public class ConversationService {
                                ObjectMapper objectMapper,
                                RedisCacheService redisCacheService,
                                MetricsService metricsService,
-                               MeterRegistry meterRegistry) {
+                               io.micrometer.core.instrument.MeterRegistry meterRegistry,
+                               com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService) {
         this.aiModelService = aiModelService;
         this.aiTeacherBaiduAsrService = aiTeacherBaiduAsrService;
         this.webClient = webClientBuilder.build();
@@ -76,6 +83,7 @@ public class ConversationService {
         this.redisCacheService = redisCacheService;
         this.metricsService = metricsService;
         this.meterRegistry = meterRegistry;
+        this.requestMergeService = requestMergeService;
     }
 
     @PostConstruct
@@ -146,6 +154,44 @@ public class ConversationService {
      * 使用 Reactor Flux + ServerSentEvent（Spring WebFlux 原生类型）
      * 实现 SSE 流式对话，由 Spring MVC ReactiveTypeHandler 驱动异步响应。
      */
+    private Flux<ServerSentEvent<?>> tryServeOptimized(ConversationRequest req, String sessionId, ConversationSession session, String callId) {
+        // 【修改】修复逻辑漏洞：坚决不加 sessionId，但必须带上 userId 防止跨用户串话！
+        String cacheKey = CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion());
+        String cachedAnswer = redisCacheService.get(cacheKey);
+
+        if (cachedAnswer != null && !NULL_PLACEHOLDER.equals(cachedAnswer)) {
+            log.info("Redis cache hit for optimized stream, sessionId: {}", sessionId);
+            metricsService.incrementQuestionProcessed("cache", "success");
+            
+            // 组装静态数据为 SSE 流
+            return Flux.concat(
+                Flux.just(sseEvent("message", String.format("{\"type\":\"thinking\",\"content\":\"\",\"sessionId\":\"%s\"}", sessionId))),
+                Flux.fromArray(cachedAnswer.split("(?<=[。！？!?])|(?=[。！？!?])"))
+                    .filter(s -> !s.isEmpty())
+                    .index()
+                    .delayElements(Duration.ofMillis(50)) // 模拟打字机效果
+                    .map(tuple -> sseEvent("message", String.format("{\"type\":\"content\",\"chunk\":\"%s\",\"index\":%d}", escapeJson(tuple.getT2()), tuple.getT1()))),
+                Flux.just(sseEvent("message", String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}", callId, sessionId)))
+            );
+        }
+        return null;
+    }
+
+    private void cacheAnswerIfNeeded(ConversationRequest req, String answer) {
+        try {
+            String cacheKey = CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion());
+            if (answer != null && !answer.isEmpty()) {
+                redisCacheService.set(cacheKey, answer, Duration.ofHours(1));
+                log.info("Cached AI answer to Redis: key={}, ttl=1h", cacheKey);
+            } else {
+                redisCacheService.setNullPlaceholder(cacheKey);
+                log.info("Cached null placeholder to Redis: key={}", cacheKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to cache answer: {}", e.getMessage());
+        }
+    }
+
     public Flux<ServerSentEvent<?>> streamResponse(ConversationRequest req) {
         String sessionId = getOrCreateSessionId(req);
         final ConversationSession session;
@@ -164,8 +210,19 @@ public class ConversationService {
 
         var callId = "call_" + UUID.randomUUID().toString().substring(0, 8);
         final long streamStartNanos = System.nanoTime();
+        
+        // 【M7 钩子切入点】尝试使用优化组件直接返回缓存
+        Flux<ServerSentEvent<?>> optimizedStream = tryServeOptimized(req, sessionId, session, callId);
+        if (optimizedStream != null) {
+            return optimizedStream;
+        }
 
-        // 语音输入：下载音频 → ASR 转文字 → 替换 question
+        // 使用 RequestMergeService 包装实际的流式调用逻辑
+        String userId = req.getUserId() != null ? String.valueOf(req.getUserId()) : "anonymous";
+        String dedupKey = CacheKeyBuilder.dedupKey(userId, req.getQuestion());
+
+        return requestMergeService.mergeStream(dedupKey, () -> {
+            // 语音输入：下载音频 → ASR 转文字 → 替换 question
         if (req.getInputType() == InputType.voice && req.getAttachmentUrls() != null && !req.getAttachmentUrls().isEmpty()) {
             String audioUrl = req.getAttachmentUrls().get(0);
             log.info("Processing voice attachment: {}", audioUrl);
@@ -191,20 +248,6 @@ public class ConversationService {
             saveMessageToDb(sessionId, "user", req.getQuestion(), 0, 0, callId);
         }
         session.setUpdatedAt(Instant.now().toEpochMilli());
-
-        if (req.getQuestion() != null && !req.getQuestion().isEmpty()) {
-            String cacheKey = CacheKeyBuilder.QUESTION_CACHE_PREFIX + CacheKeyBuilder.questionHash(req.getQuestion());
-            String cached = redisCacheService.get(cacheKey);
-            if (cached != null) {
-                if (RedisCacheService.NULL_PLACEHOLDER.equals(cached)) {
-                    metricsService.incrementQuestionProcessed("cache", "null");
-                    return buildCachedStream(req, session, sessionId, callId, null);
-                }
-                log.info("Redis cache hit, replaying answer for question hash: {}", cacheKey);
-                metricsService.incrementQuestionProcessed("cache", "success");
-                return buildCachedStream(req, session, sessionId, callId, cached);
-            }
-        }
 
         StringBuilder fullAnswer = new StringBuilder();
         AtomicInteger index = new AtomicInteger(0);
@@ -244,6 +287,7 @@ public class ConversationService {
                         cacheAnswerIfNeeded(req, answer);
                         metricsService.incrementQuestionProcessed("full", "success");
                         streamFinished.set(true);
+
                         fluxSink.next(sseEvent("message",
                             String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":%d,\"output\":%d}}",
                                 callId, sessionId,
@@ -336,44 +380,7 @@ public class ConversationService {
                 cleanup(sessionId);
             });
         });
-    }
-
-    private Flux<ServerSentEvent<?>> buildCachedStream(ConversationRequest req, ConversationSession session,
-                                                       String sessionId, String callId, String answer) {
-        if (answer != null && !answer.isEmpty()) {
-            session.getMessages().add(Map.of("role", "assistant", "content", answer));
-            saveMessageToDb(sessionId, "assistant", answer, 0, 0, callId);
-            int msgCount = messageMapper.selectBySessionId(sessionId).size();
-            sessionMapper.updateMessageCount(sessionId, msgCount);
-            saveSessionToRedis(session);
-        }
-        return Flux.create(fluxSink -> {
-            fluxSink.next(sseEvent("message",
-                String.format("{\"type\":\"thinking\",\"content\":\"\",\"sessionId\":\"%s\"}", sessionId)));
-            if (answer != null && !answer.isEmpty()) {
-                fluxSink.next(sseEvent("message",
-                    String.format("{\"type\":\"content\",\"chunk\":\"%s\",\"index\":0}", escapeJson(answer))));
-            }
-            fluxSink.next(sseEvent("message",
-                String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}",
-                    callId, sessionId)));
-            fluxSink.complete();
         });
-    }
-
-    private void cacheAnswerIfNeeded(ConversationRequest req, String answer) {
-        try {
-            String cacheKey = CacheKeyBuilder.QUESTION_CACHE_PREFIX + CacheKeyBuilder.questionHash(req.getQuestion());
-            if (answer != null && !answer.isEmpty()) {
-                redisCacheService.set(cacheKey, answer, Duration.ofHours(1));
-                log.info("Cached AI answer to Redis: key={}, ttl=1h", cacheKey);
-            } else {
-                redisCacheService.setNullPlaceholder(cacheKey);
-                log.info("Cached null placeholder to Redis: key={}", cacheKey);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to cache answer: {}", e.getMessage());
-        }
     }
 
     public void interrupt(String sessionId) {

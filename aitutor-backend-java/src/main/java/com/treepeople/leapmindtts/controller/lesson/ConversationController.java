@@ -4,8 +4,6 @@ import com.treepeople.leapmindtts.pojo.dto.ConversationRequest;
 import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.service.lesson.ConversationService;
-import io.github.resilience4j.ratelimiter.RequestNotPermitted;
-import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,7 +25,7 @@ public class ConversationController {
     private final ConversationService conversationService;
 
     @PostMapping(value = "/ask", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    @RateLimiter(name = "userQuestionLimiter", fallbackMethod = "askRateLimitFallback")
+    @io.github.resilience4j.ratelimiter.annotation.RateLimiter(name = "userQuestionLimiter", fallbackMethod = "askRateLimitFallback")
     public Flux<ServerSentEvent<?>> ask(@RequestBody @Valid ConversationRequest request) {
         log.info("Conversation ask: userId={}, sessionId={}, sceneType={}, question={}",
                 request.getUserId(), request.getSessionId(), request.getSceneType(),
@@ -36,9 +34,12 @@ public class ConversationController {
         return conversationService.streamResponse(request);
     }
 
-    public Flux<ServerSentEvent<?>> askRateLimitFallback(ConversationRequest request, RequestNotPermitted ex) {
-        log.warn("Conversation rate limited for userId={}", request.getUserId());
-        return Flux.just(ServerSentEvent.builder("message")
+    /**
+     * Rate Limiter的降级方法
+     */
+    public Flux<ServerSentEvent<?>> askRateLimitFallback(ConversationRequest request, Throwable t) {
+        log.warn("Conversation API Rate limit triggered for user: {}", request.getUserId());
+        return Flux.just(ServerSentEvent.<Object>builder()
                 .event("message")
                 .data("{\"type\":\"error\",\"message\":\"请求过于频繁，请稍后再试\"}")
                 .build());
