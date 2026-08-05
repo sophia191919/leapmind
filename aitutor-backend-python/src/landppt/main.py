@@ -17,6 +17,7 @@ from .api.global_master_template_api import router as template_api_router
 from .api.config_api import router as config_router
 from .api.image_api import router as image_router
 from .api.lesson_prep_api import router as lesson_prep_router
+from .api.internal_ai import router as internal_ai_router
 from .api.weak_points_api import router as weak_points_router
 from .m6.router import router as m6_router
 
@@ -109,6 +110,7 @@ app.include_router(database_router, tags=["Database Management"])
 app.include_router(weak_points_router, tags=["Learning Analysis"])
 app.include_router(web_router, prefix="", tags=["Web Interface"])
 app.include_router(lesson_prep_router)
+app.include_router(internal_ai_router)
 app.include_router(m6_router, prefix="", tags=["M6 复习与画像"])
 
 # Mount static files
@@ -139,7 +141,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "src.landppt.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True,
         log_level="info"
     )
