@@ -11,6 +11,11 @@ import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
 import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
+// 【引入缺失的优化组件与工具类】
+import com.treepeople.leapmindtts.service.common.RedisCacheService;
+import com.treepeople.leapmindtts.service.common.MetricsService;
+import com.treepeople.leapmindtts.util.CacheKeyBuilder;
+
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -44,8 +49,17 @@ public class ConversationService {
     private final ConversationProperties properties;
     private final ObjectMapper objectMapper;
 
+    // 【新增】注入优化组件服务
+    private final RedisCacheService redisCacheService;
+    private final MetricsService metricsService;
+    private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
+    private final com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService;
+
     private final ConcurrentHashMap<String, BaseSubscriber<AIModelService.AiChunk>> activeSubscribers = new ConcurrentHashMap<>();
 
+    public static final String NULL_PLACEHOLDER = "__NULL__";
+
+    // 【修改】在构造函数中补充 RedisCacheService 和 MetricsService 的注入
     public ConversationService(AIModelService aiModelService,
                                AiTeacherBaiduAsrService aiTeacherBaiduAsrService,
                                WebClient.Builder webClientBuilder,
@@ -53,7 +67,11 @@ public class ConversationService {
                                ConversationSessionMapper sessionMapper,
                                ConversationMessageMapper messageMapper,
                                ConversationProperties properties,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               RedisCacheService redisCacheService,
+                               MetricsService metricsService,
+                               io.micrometer.core.instrument.MeterRegistry meterRegistry,
+                               com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService) {
         this.aiModelService = aiModelService;
         this.aiTeacherBaiduAsrService = aiTeacherBaiduAsrService;
         this.webClient = webClientBuilder.build();
@@ -62,6 +80,10 @@ public class ConversationService {
         this.messageMapper = messageMapper;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.redisCacheService = redisCacheService;
+        this.metricsService = metricsService;
+        this.meterRegistry = meterRegistry;
+        this.requestMergeService = requestMergeService;
     }
 
     @PostConstruct
@@ -132,6 +154,44 @@ public class ConversationService {
      * 使用 Reactor Flux + ServerSentEvent（Spring WebFlux 原生类型）
      * 实现 SSE 流式对话，由 Spring MVC ReactiveTypeHandler 驱动异步响应。
      */
+    private Flux<ServerSentEvent<?>> tryServeOptimized(ConversationRequest req, String sessionId, ConversationSession session, String callId) {
+        // 【修改】修复逻辑漏洞：坚决不加 sessionId，但必须带上 userId 防止跨用户串话！
+        String cacheKey = CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion());
+        String cachedAnswer = redisCacheService.get(cacheKey);
+
+        if (cachedAnswer != null && !NULL_PLACEHOLDER.equals(cachedAnswer)) {
+            log.info("Redis cache hit for optimized stream, sessionId: {}", sessionId);
+            metricsService.incrementQuestionProcessed("cache", "success");
+            
+            // 组装静态数据为 SSE 流
+            return Flux.concat(
+                Flux.just(sseEvent("message", String.format("{\"type\":\"thinking\",\"content\":\"\",\"sessionId\":\"%s\"}", sessionId))),
+                Flux.fromArray(cachedAnswer.split("(?<=[。！？!?])|(?=[。！？!?])"))
+                    .filter(s -> !s.isEmpty())
+                    .index()
+                    .delayElements(Duration.ofMillis(50)) // 模拟打字机效果
+                    .map(tuple -> sseEvent("message", String.format("{\"type\":\"content\",\"chunk\":\"%s\",\"index\":%d}", escapeJson(tuple.getT2()), tuple.getT1()))),
+                Flux.just(sseEvent("message", String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}", callId, sessionId)))
+            );
+        }
+        return null;
+    }
+
+    private void cacheAnswerIfNeeded(ConversationRequest req, String answer) {
+        try {
+            String cacheKey = CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion());
+            if (answer != null && !answer.isEmpty()) {
+                redisCacheService.set(cacheKey, answer, Duration.ofHours(1));
+                log.info("Cached AI answer to Redis: key={}, ttl=1h", cacheKey);
+            } else {
+                redisCacheService.setNullPlaceholder(cacheKey);
+                log.info("Cached null placeholder to Redis: key={}", cacheKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to cache answer: {}", e.getMessage());
+        }
+    }
+
     public Flux<ServerSentEvent<?>> streamResponse(ConversationRequest req) {
         String sessionId = getOrCreateSessionId(req);
         final ConversationSession session;
@@ -149,8 +209,20 @@ public class ConversationService {
         }
 
         var callId = "call_" + UUID.randomUUID().toString().substring(0, 8);
+        final long streamStartNanos = System.nanoTime();
+        
+        // 【M7 钩子切入点】尝试使用优化组件直接返回缓存
+        Flux<ServerSentEvent<?>> optimizedStream = tryServeOptimized(req, sessionId, session, callId);
+        if (optimizedStream != null) {
+            return optimizedStream;
+        }
 
-        // 语音输入：下载音频 → ASR 转文字 → 替换 question
+        // 使用 RequestMergeService 包装实际的流式调用逻辑
+        String userId = req.getUserId() != null ? String.valueOf(req.getUserId()) : "anonymous";
+        String dedupKey = CacheKeyBuilder.dedupKey(userId, req.getQuestion());
+
+        return requestMergeService.mergeStream(dedupKey, () -> {
+            // 语音输入：下载音频 → ASR 转文字 → 替换 question
         if (req.getInputType() == InputType.voice && req.getAttachmentUrls() != null && !req.getAttachmentUrls().isEmpty()) {
             String audioUrl = req.getAttachmentUrls().get(0);
             log.info("Processing voice attachment: {}", audioUrl);
@@ -180,6 +252,8 @@ public class ConversationService {
         StringBuilder fullAnswer = new StringBuilder();
         AtomicInteger index = new AtomicInteger(0);
         AtomicBoolean messageSaved = new AtomicBoolean(false);
+        AtomicBoolean firstChunk = new AtomicBoolean(false);
+        AtomicBoolean streamFinished = new AtomicBoolean(false);
 
         return Flux.create(fluxSink -> {
             // 1. 先发 thinking 事件（带上 sessionId，打断用）
@@ -191,6 +265,11 @@ public class ConversationService {
                 @Override
                 protected void hookOnNext(AIModelService.AiChunk chunk) {
                     fullAnswer.append(chunk.getChunk());
+
+                    if (firstChunk.compareAndSet(false, true)) {
+                        meterRegistry.timer("conversation.ttft")
+                                .record(Duration.ofNanos(System.nanoTime() - streamStartNanos));
+                    }
 
                     if (chunk.isLast()) {
                         String answer = fullAnswer.toString();
@@ -204,6 +283,10 @@ public class ConversationService {
                         int msgCount = messageMapper.selectBySessionId(sessionId).size();
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
+
+                        cacheAnswerIfNeeded(req, answer);
+                        metricsService.incrementQuestionProcessed("full", "success");
+                        streamFinished.set(true);
 
                         fluxSink.next(sseEvent("message",
                             String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":%d,\"output\":%d}}",
@@ -241,6 +324,9 @@ public class ConversationService {
                 protected void hookOnError(Throwable t) {
                     if (messageSaved.get()) return;
                     log.error("AI stream error for session {}: {}", sessionId, t.getMessage());
+                    streamFinished.set(true);
+                    meterRegistry.counter("conversation.stream.error").increment();
+                    metricsService.incrementQuestionProcessed("full", "error");
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"error\",\"message\":\"%s\"}", escapeJson(t.getMessage()))));
                     fluxSink.complete();
@@ -258,6 +344,9 @@ public class ConversationService {
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
                     }
+                    cacheAnswerIfNeeded(req, answer);
+                    metricsService.incrementQuestionProcessed("full", "success");
+                    streamFinished.set(true);
                     fluxSink.next(sseEvent("message",
                         String.format("{\"type\":\"done\",\"callId\":\"%s\",\"sessionId\":\"%s\",\"tokenUsage\":{\"input\":0,\"output\":0}}",
                             callId, sessionId)));
@@ -278,17 +367,25 @@ public class ConversationService {
 
             fluxSink.onCancel(() -> {
                 log.info("Flux cancelled for session: {}", sessionId);
+                if (streamFinished.compareAndSet(false, true)) {
+                    meterRegistry.counter("conversation.stream.disconnect").increment();
+                }
                 cleanup(sessionId);
             });
             fluxSink.onDispose(() -> {
                 log.info("Flux disposed for session: {}", sessionId);
+                if (streamFinished.compareAndSet(false, true)) {
+                    meterRegistry.counter("conversation.stream.disconnect").increment();
+                }
                 cleanup(sessionId);
             });
+        });
         });
     }
 
     public void interrupt(String sessionId) {
         log.info("Interrupting session: {}", sessionId);
+        meterRegistry.counter("conversation.interrupt.count").increment();
 
         // 先发打断事件（如果有 session 尚在连接中）
         // Flux.create 方式下无法直接向 fluxSink 发事件，
