@@ -11,7 +11,9 @@ import com.treepeople.leapmindtts.pojo.dto.ConversationRequest.SceneType;
 import com.treepeople.leapmindtts.pojo.dto.ConversationSession;
 import com.treepeople.leapmindtts.pojo.entity.ConversationMessageEntity;
 import com.treepeople.leapmindtts.pojo.entity.ConversationSessionEntity;
+import com.treepeople.leapmindtts.pojo.entity.EventCollection;
 // 【引入缺失的优化组件与工具类】
+import com.treepeople.leapmindtts.service.EventCollectionService;
 import com.treepeople.leapmindtts.service.common.RedisCacheService;
 import com.treepeople.leapmindtts.service.common.MetricsService;
 import com.treepeople.leapmindtts.util.CacheKeyBuilder;
@@ -27,6 +29,7 @@ import reactor.core.publisher.Flux;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +57,7 @@ public class ConversationService {
     private final MetricsService metricsService;
     private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
     private final com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService;
+    private final EventCollectionService eventCollectionService;
 
     private final ConcurrentHashMap<String, BaseSubscriber<AIModelService.AiChunk>> activeSubscribers = new ConcurrentHashMap<>();
 
@@ -71,7 +75,8 @@ public class ConversationService {
                                RedisCacheService redisCacheService,
                                MetricsService metricsService,
                                io.micrometer.core.instrument.MeterRegistry meterRegistry,
-                               com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService) {
+                               com.treepeople.leapmindtts.service.common.RequestMergeService requestMergeService,
+                               EventCollectionService eventCollectionService) {
         this.aiModelService = aiModelService;
         this.aiTeacherBaiduAsrService = aiTeacherBaiduAsrService;
         this.webClient = webClientBuilder.build();
@@ -84,6 +89,7 @@ public class ConversationService {
         this.metricsService = metricsService;
         this.meterRegistry = meterRegistry;
         this.requestMergeService = requestMergeService;
+        this.eventCollectionService = eventCollectionService;
     }
 
     @PostConstruct
@@ -177,8 +183,11 @@ public class ConversationService {
         return null;
     }
 
-    private void cacheAnswerIfNeeded(ConversationRequest req, String answer) {
+    private void cacheAnswerIfNeeded(ConversationRequest req, String answer, boolean isFollowUp) {
         try {
+            if (isFollowUp) {
+                return;
+            }
             String cacheKey = CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion());
             if (answer != null && !answer.isEmpty()) {
                 redisCacheService.set(cacheKey, answer, Duration.ofHours(1));
@@ -189,6 +198,55 @@ public class ConversationService {
             }
         } catch (Exception e) {
             log.warn("Failed to cache answer: {}", e.getMessage());
+        }
+    }
+
+    private void publishAskDoubtEvent(ConversationRequest req, boolean isFollowUp) {
+        try {
+            if (req.getUserId() == null || req.getQuestion() == null || req.getQuestion().isEmpty()) {
+                return;
+            }
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("topic", truncate(req.getQuestion(), 120));
+            data.put("confusionTag", "concept_unclear");
+            data.put("isFollowUp", isFollowUp);
+            EventCollection event = EventCollection.builder()
+                    .module("M7")
+                    .eventType("ask_doubt")
+                    .userId(req.getUserId())
+                    .eventData(objectMapper.writeValueAsString(data))
+                    .eventTime(LocalDateTime.now())
+                    .processed(0)
+                    .build();
+            eventCollectionService.collectEvent(event);
+            log.info("Published M7 ask_doubt event for userId={}, topic={}", req.getUserId(), req.getQuestion());
+        } catch (Exception e) {
+            log.warn("Failed to publish M7 ask_doubt event: {}", e.getMessage());
+        }
+    }
+
+    private String truncate(String s, int max) {
+        if (s.codePointCount(0, s.length()) <= max) return s;
+        return s.substring(0, s.offsetByCodePoints(0, max));
+    }
+
+    private void persistReplayedPair(String sessionId, ConversationSession session, ConversationRequest req, String callId) {
+        try {
+            if (req.getQuestion() == null || req.getQuestion().isEmpty() || session.getMessages() == null) {
+                return;
+            }
+            String cachedAnswer = redisCacheService.get(CacheKeyBuilder.dedupKey(String.valueOf(req.getUserId()), req.getQuestion()));
+            session.getMessages().add(Map.of("role", "user", "content", req.getQuestion()));
+            saveMessageToDb(sessionId, "user", req.getQuestion(), 0, 0, callId);
+            if (cachedAnswer != null && !NULL_PLACEHOLDER.equals(cachedAnswer)) {
+                session.getMessages().add(Map.of("role", "assistant", "content", cachedAnswer));
+                saveMessageToDb(sessionId, "assistant", cachedAnswer, 0, 0, callId);
+            }
+            int msgCount = messageMapper.selectBySessionId(sessionId).size();
+            sessionMapper.updateMessageCount(sessionId, msgCount);
+            saveSessionToRedis(session);
+        } catch (Exception e) {
+            log.warn("Failed to persist replayed conversation pair: {}", e.getMessage());
         }
     }
 
@@ -210,10 +268,14 @@ public class ConversationService {
 
         var callId = "call_" + UUID.randomUUID().toString().substring(0, 8);
         final long streamStartNanos = System.nanoTime();
-        
-        // 【M7 钩子切入点】尝试使用优化组件直接返回缓存
-        Flux<ServerSentEvent<?>> optimizedStream = tryServeOptimized(req, sessionId, session, callId);
+        final boolean isFollowUp = session.getMessages() != null
+                && session.getMessages().stream().anyMatch(m -> "user".equals(m.get("role")));
+
+        // 【M7 钩子切入点】尝试使用优化组件直接返回缓存（仅首问走缓存；追问依赖会话上下文，不能命中全局缓存）
+        Flux<ServerSentEvent<?>> optimizedStream = isFollowUp ? null : tryServeOptimized(req, sessionId, session, callId);
         if (optimizedStream != null) {
+            persistReplayedPair(sessionId, session, req, callId);
+            publishAskDoubtEvent(req, isFollowUp);
             return optimizedStream;
         }
 
@@ -284,7 +346,8 @@ public class ConversationService {
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
 
-                        cacheAnswerIfNeeded(req, answer);
+                        cacheAnswerIfNeeded(req, answer, isFollowUp);
+                        publishAskDoubtEvent(req, isFollowUp);
                         metricsService.incrementQuestionProcessed("full", "success");
                         streamFinished.set(true);
 
@@ -344,7 +407,8 @@ public class ConversationService {
                         sessionMapper.updateMessageCount(sessionId, msgCount);
                         saveSessionToRedis(session);
                     }
-                    cacheAnswerIfNeeded(req, answer);
+                    cacheAnswerIfNeeded(req, answer, isFollowUp);
+                    publishAskDoubtEvent(req, isFollowUp);
                     metricsService.incrementQuestionProcessed("full", "success");
                     streamFinished.set(true);
                     fluxSink.next(sseEvent("message",
