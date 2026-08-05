@@ -201,15 +201,19 @@ public class ConversationService {
         }
     }
 
-    private void publishAskDoubtEvent(ConversationRequest req, boolean isFollowUp) {
+    private void publishAskDoubtEvent(String sessionId, ConversationRequest req, boolean isFollowUp) {
         try {
             if (req.getUserId() == null || req.getQuestion() == null || req.getQuestion().isEmpty()) {
                 return;
             }
+            String topic = truncate(req.getQuestion(), 120);
             Map<String, Object> data = new LinkedHashMap<>();
-            data.put("topic", truncate(req.getQuestion(), 120));
+            data.put("topic", topic);
             data.put("confusionTag", "concept_unclear");
             data.put("isFollowUp", isFollowUp);
+            if (sessionId != null) {
+                data.put("sessionId", sessionId);
+            }
             EventCollection event = EventCollection.builder()
                     .module("M7")
                     .eventType("ask_doubt")
@@ -219,7 +223,8 @@ public class ConversationService {
                     .processed(0)
                     .build();
             eventCollectionService.collectEvent(event);
-            log.info("Published M7 ask_doubt event for userId={}, topic={}", req.getUserId(), req.getQuestion());
+            log.info("Published M7 ask_doubt event for userId={}, topicLength={}, isFollowUp={}",
+                    req.getUserId(), topic.codePointCount(0, topic.length()), isFollowUp);
         } catch (Exception e) {
             log.warn("Failed to publish M7 ask_doubt event: {}", e.getMessage());
         }
@@ -275,7 +280,7 @@ public class ConversationService {
         Flux<ServerSentEvent<?>> optimizedStream = isFollowUp ? null : tryServeOptimized(req, sessionId, session, callId);
         if (optimizedStream != null) {
             persistReplayedPair(sessionId, session, req, callId);
-            publishAskDoubtEvent(req, isFollowUp);
+            publishAskDoubtEvent(sessionId, req, isFollowUp);
             return optimizedStream;
         }
 
@@ -347,7 +352,7 @@ public class ConversationService {
                         saveSessionToRedis(session);
 
                         cacheAnswerIfNeeded(req, answer, isFollowUp);
-                        publishAskDoubtEvent(req, isFollowUp);
+                        publishAskDoubtEvent(sessionId, req, isFollowUp);
                         metricsService.incrementQuestionProcessed("full", "success");
                         streamFinished.set(true);
 
@@ -408,7 +413,7 @@ public class ConversationService {
                         saveSessionToRedis(session);
                     }
                     cacheAnswerIfNeeded(req, answer, isFollowUp);
-                    publishAskDoubtEvent(req, isFollowUp);
+                    publishAskDoubtEvent(sessionId, req, isFollowUp);
                     metricsService.incrementQuestionProcessed("full", "success");
                     streamFinished.set(true);
                     fluxSink.next(sseEvent("message",
