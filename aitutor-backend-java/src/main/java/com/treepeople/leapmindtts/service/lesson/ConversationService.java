@@ -235,6 +235,27 @@ public class ConversationService {
         return s.substring(0, s.offsetByCodePoints(0, max));
     }
 
+    private String buildScenePrompt(SceneType sceneType, Map<String, Object> context) {
+        String scene = switch (sceneType == null ? SceneType.general_qa : sceneType) {
+            case doing_exercise -> "你是一位耐心细致的答题老师。学生在做题时向你提问，请结合当前题目知识点讲解解题思路，步骤清晰，语气亲切。";
+            case explaining -> "你是一位善于讲解的老师。学生在学习过程中向你追问，请结合正在讲解的内容深入浅出地解答，适当举例。";
+            case teaching -> "你是一位亲切生动的授课老师。请用通俗易懂的语言向学生讲课，把知识点讲清楚，适当与学生互动。";
+            case lesson_prep -> "你是一位备课助手。请帮助老师准备课程内容，提供结构化、实用的备课建议与教学设计。";
+            default -> "你是一位聪明且体贴的老师，请用简洁友好的方式回答问题。";
+        };
+        if (context == null || context.isEmpty()) {
+            return scene;
+        }
+        StringBuilder sb = new StringBuilder(scene);
+        sb.append("\n【当前场景上下文】");
+        context.forEach((k, v) -> {
+            if (v != null) {
+                sb.append("\n- ").append(k).append(": ").append(v);
+            }
+        });
+        return sb.toString();
+    }
+
     private void persistReplayedPair(String sessionId, ConversationSession session, ConversationRequest req, String callId) {
         try {
             if (req.getQuestion() == null || req.getQuestion().isEmpty() || session.getMessages() == null) {
@@ -430,7 +451,10 @@ public class ConversationService {
             } else {
                 history = allHistory;
             }
-            aiModelService.streamAIResponse(history, req.getInputType(), req.getAttachmentUrls())
+            List<Map<String, String>> aiMessages = new ArrayList<>(history.size() + 1);
+            aiMessages.add(Map.of("role", "system", "content", buildScenePrompt(session.getSceneType(), session.getContext())));
+            aiMessages.addAll(history);
+            aiModelService.streamAIResponse(aiMessages, req.getInputType(), req.getAttachmentUrls())
                 .subscribe(subscriber);
             activeSubscribers.put(sessionId, subscriber);
 
