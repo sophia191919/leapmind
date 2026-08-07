@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   BarChart3,
   CalendarDays,
   CheckCircle2,
@@ -43,21 +44,51 @@ export default function StatisticsPage() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState("week");
+  const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setError("");
     getStatistics({ period })
       .then((data) => active && setStats(data))
-      .catch((error) => console.error("加载统计数据失败:", error))
+      .catch((loadError) => {
+        console.error("加载统计数据失败:", loadError);
+        if (active) {
+          setStats(null);
+          setError(loadError.message || "统计数据加载失败，请检查后端服务后重试");
+        }
+      })
       .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [period]);
+  }, [period, reloadKey]);
 
   if (loading) {
     return (
       <div className="flex justify-center py-24">
         <div className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mx-auto max-w-3xl rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-700" role="alert">
+        <div className="flex items-start gap-3">
+          <AlertCircle size={22} className="mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <h1 className="font-semibold">统计数据未能从数据库加载</h1>
+            <p className="mt-1 text-sm">{error}</p>
+            <p className="mt-1 text-xs text-rose-600">为避免把临时数据误认为已保存记录，本页不会显示 Mock 统计。</p>
+          </div>
+          <button
+            onClick={() => setReloadKey((value) => value + 1)}
+            className="cursor-pointer rounded-lg bg-white px-3 py-2 text-sm font-medium ring-1 ring-rose-200 hover:bg-rose-100"
+          >
+            重新加载
+          </button>
+        </div>
       </div>
     );
   }
